@@ -23,7 +23,8 @@ data/sid_output/**
 data/Beauty.pretrain.with_summaries.json
 !data/Beauty.pretrain.with_summaries.part*.json
 !data/sequential_data_processed.txt
-!data/user_summaries.json
+data/user_summaries.json
+!data/user_summaries.part*.json
 
 # Misc
 .DS_Store
