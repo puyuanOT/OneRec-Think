@@ -193,8 +193,8 @@ def save_summaries(
 
 def main():
     # Configuration
-    BEAUTY_ITEMS_FILE = Path("./Beauty.pretrain.json")
-    OUTPUT_FILE = Path("./Beauty.pretrain.with_summaries.json")
+    BEAUTY_ITEMS_FILE = Path(__file__).resolve().parent / "Beauty.pretrain.json"
+    OUTPUT_FILE = Path(__file__).resolve().parent / "Beauty.pretrain.with_summaries.json"
     API_KEY = os.environ.get("OAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
     if not API_KEY:
         raise RuntimeError("Please set OAI_API_KEY or OPENAI_API_KEY.")
@@ -221,7 +221,7 @@ def main():
     print(f"Prepared {len(inputs)} items for processing")
     
     # Generate summaries
-    print("\nGenerating summaries with GPT-4o-mini...")
+    print("\nGenerating summaries with GPT-4.1-mini...")
     summaries = generate_summaries_batch(
         inputs=inputs,
         api_key=API_KEY,

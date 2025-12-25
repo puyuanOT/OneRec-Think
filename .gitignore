@@ -18,9 +18,10 @@ train/logs/
 data/*.parquet
 data/sid_output/**
 
-# Keep raw and OAI-generated JSONs
+# Keep raw and OAI-generated JSONs (but ignore the large combined summaries file)
 !data/Beauty.pretrain.json
-!data/Beauty.pretrain.with_summaries.json
+data/Beauty.pretrain.with_summaries.json
+!data/Beauty.pretrain.with_summaries.part*.json
 !data/sequential_data_processed.txt
 !data/user_summaries.json
 
