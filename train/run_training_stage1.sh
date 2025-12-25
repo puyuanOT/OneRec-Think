@@ -7,6 +7,12 @@ MODEL_DIR="../basemodel/Qwen3-1-7B-expand"
 TRAIN_DATA="../data/training_align_data_train.parquet"
 VAL_DATA="../data/training_align_data_val.parquet"
 
+if [[ ! -f "${TRAIN_DATA}" || ! -f "${VAL_DATA}" ]]; then
+    echo "Alignment data not found. Please generate with:"
+    echo "  python ../data/generate_training_data.py"
+    exit 1
+fi
+
 nohup deepspeed --hostfile=./scripts/hostfile \
     --num_gpus 8 ./scripts/train_beauty_align.py \
     --model_dir "${MODEL_DIR}" \

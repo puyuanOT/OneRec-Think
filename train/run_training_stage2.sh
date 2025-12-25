@@ -4,45 +4,60 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}"
 
-REC_SCRIPT="${SCRIPT_DIR}/scripts/run_training_rec.sh"
-RA_SCRIPT="${SCRIPT_DIR}/scripts/run_training_RA.sh"
-REC_RESULTS_DIR="${SCRIPT_DIR}/results/beauty_sid_rec"
-REC_PROCESS_PATTERN="train_beauty_sid_rec.py"
+MULTITASK_SCRIPT="${SCRIPT_DIR}/scripts/run_training_multitask.sh"
+MULTITASK_RESULTS_DIR="${SCRIPT_DIR}/results/beauty_multitask"
+MULTITASK_PROCESS_PATTERN="train_beauty_multitask.py"
 
-if [[ ! -x "${REC_SCRIPT}" ]]; then
-    echo "Error: ${REC_SCRIPT} not found or not executable." >&2
+if [[ ! -x "${MULTITASK_SCRIPT}" ]]; then
+    echo "Error: ${MULTITASK_SCRIPT} not found or not executable." >&2
     exit 1
 fi
 
-if [[ ! -x "${RA_SCRIPT}" ]]; then
-    echo "Error: ${RA_SCRIPT} not found or not executable." >&2
+echo "=== Stage 2: Multi-Task Integration Training ==="
+echo "This stage trains on all 4 tasks:"
+echo "  - Interleaved User Persona Grounding"
+echo "  - Sequential Preference Modeling"
+echo "  - Itemic Dense Captioning"
+echo "  - General Language Modeling"
+echo ""
+echo "All model parameters are trained (not just embeddings)."
+echo ""
+
+# Ensure multi-task data exists
+MULTITASK_TRAIN="../data/training_multitask_data_train.parquet"
+MULTITASK_VAL="../data/training_multitask_data_val.parquet"
+if [[ ! -f "${MULTITASK_TRAIN}" || ! -f "${MULTITASK_VAL}" ]]; then
+    echo "Multi-task data not found. Please prepare it with:"
+    echo "  export HF_TOKEN=YOUR_HF_TOKEN"
+    echo "  python ../data/download_general_corpus.py"
+    echo "  python ../data/generate_multitask_data.py"
     exit 1
 fi
 
-echo "=== Stage 1: Starting recommendation training (run_training_rec.sh) ==="
-bash "${REC_SCRIPT}"
+bash "${MULTITASK_SCRIPT}"
 
-echo "Waiting for recommendation training process to complete..."
+echo ""
+echo "Waiting for multi-task training process to complete..."
 sleep 10
-while pgrep -f "${REC_PROCESS_PATTERN}" > /dev/null; do
+while pgrep -f "${MULTITASK_PROCESS_PATTERN}" > /dev/null; do
     sleep 60
 done
-echo "Recommendation training finished."
+echo "Multi-task training finished."
 
-if [[ ! -d "${REC_RESULTS_DIR}" ]]; then
-    echo "Error: results directory ${REC_RESULTS_DIR} not found." >&2
+if [[ ! -d "${MULTITASK_RESULTS_DIR}" ]]; then
+    echo "Error: results directory ${MULTITASK_RESULTS_DIR} not found." >&2
     exit 1
 fi
 
-last_checkpoint=$(ls -d "${REC_RESULTS_DIR}"/checkpoint-* 2>/dev/null | sort -V | tail -n 1 || true)
+last_checkpoint=$(ls -d "${MULTITASK_RESULTS_DIR}"/checkpoint-* 2>/dev/null | sort -V | tail -n 1 || true)
 if [[ -z "${last_checkpoint}" ]]; then
-    echo "Error: no checkpoint directories found under ${REC_RESULTS_DIR}." >&2
+    echo "Error: no checkpoint directories found under ${MULTITASK_RESULTS_DIR}." >&2
     exit 1
 fi
 
-echo "Identified final checkpoint for RA stage: ${last_checkpoint}"
-
-echo "=== Stage 2: Starting reasoning activation training (run_training_RA.sh) ==="
-bash "${RA_SCRIPT}" "${last_checkpoint}"
-
-echo "Pipeline completed successfully."
+echo ""
+echo "Stage 2 (Multi-Task Integration) completed successfully."
+echo "Latest checkpoint: ${last_checkpoint}"
+echo ""
+echo "Next step: Run Stage 3 (Reasoning Activation) with:"
+echo "  bash run_training_stage3.sh"

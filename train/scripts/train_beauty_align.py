@@ -126,13 +126,15 @@ if __name__ == "__main__":
     print(f"First 10 valid special tokens: {valid_special_tokens[:10]}")
     print(f"Training token IDs range: {min(valid_special_token_ids)} to {max(valid_special_token_ids)}")
 
-    lora_config = TrainableTokensConfig(
+    # TrainableTokensConfig is NOT LoRA - it's a PEFT adapter specifically for training token embeddings
+    # During token warm-up, we only train embeddings for new tokens, not the LLM backbone
+    peft_config = TrainableTokensConfig(
         token_indices=valid_special_token_ids,
         target_modules=["embed_tokens"],
         init_weights=True
     )
     
-    model = get_peft_model(model, lora_config)
+    model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
     if training_args.local_rank == 0:

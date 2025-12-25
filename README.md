@@ -21,85 +21,124 @@ Run the environment setup script before proceeding:
 bash setup_conda_env.sh
 ```
 
-### 1. Obtain the Base Model
-- **Download Qwen3-1.7B from Hugging Face**  
-```bash
-cd basemodel
-python3 download_basemodel.py
-```
-The model is saved under `basemodel/Qwen3-1-7B/`.
+### 1) Obtain and expand the base model
+- Download Qwen3-1.7B:
+  ```bash
+  cd basemodel
+  python download_basemodel.py
+  ```
+- Expand vocabulary with SID tokens:
+  ```bash
+  python expand_vocab.py
+  ```
+  Output: `basemodel/Qwen3-1-7B-expand/`
 
-- **Extend the vocabulary to support SID tokens**  
-```bash
-python3 expand_vocab.py
-```
-The script reads `basemodel/Qwen3-1-7B/` and writes the extended model to `basemodel/Qwen3-1-7B-expand/`.
+### 2) Prepare data (four tasks + supporting summaries)
+All commands below run from `data/`. A lightweight venv already exists at `.venv_summaries`; activate it if desired.
 
-### 2. Generate Alignment Training Data
-```bash
-cd data
-python3 generate_training_data.py
-```
-The script consumes `data/sequential_data_processed.txt` and `data/Beauty.pretrain.json`, producing train/validation/test parquet files (`training_data_train.parquet`, `training_data_val.parquet`, `training_data_test.parquet`) for the alignment stage.
+1. Item summaries (AI-generated, GPT-4.1-mini):
+   ```bash
+   OAI_API_KEY=... python generate_item_summaries.py
+   # writes Beauty.pretrain.with_summaries.json
+   ```
+2. User summaries for warm-up (uses item summaries + interaction sequences):
+   ```bash
+   OAI_API_KEY=... python generate_user_summaries.py
+   # writes user_summaries.json
+   ```
+3. Interleaved User Persona Grounding (warm-up data):
+   ```bash
+   python generate_training_data.py
+   # uses sequential_data_processed.txt + user_summaries.json
+   # outputs training_align_data_{train,val,test}.parquet
+   ```
+4. Sequential Preference Modeling:
+   ```bash
+   python generate_sid_prediction_data.py
+   # outputs training_prediction_sid_data_{train,val,test}.parquet
+   ```
+5. Itemic Dense Captioning (reconstruct summaries):
+   ```bash
+   python generate_caption_data.py
+   # uses Beauty.pretrain.with_summaries.json
+   # outputs training_caption_data_{train,val,test}.parquet
+   ```
+6. General Language Modeling (from HF; requires HF_TOKEN):
+   ```bash
+   pip install -r requirements_general.txt
+   HF_TOKEN=... python download_general_corpus.py
+   # outputs general_corpus_{train,val,test}.parquet
+   ```
+7. Combine 4 tasks for multi-task integration:
+   ```bash
+   python generate_multitask_data.py
+   # outputs training_multitask_data_{train,val,test}.parquet
+   ```
 
-### 3. Run Itemic Alignment Fine-tuning and Merge
-- **Launch the alignment stage**
-```bash
-cd train
-bash run_training_stage1.sh
-```
-This launches the LoRA-based alignment training with the parquet files generated above; adjust the script variables as needed for your environment.
+### 3) Training pipeline
+Runs from `train/`.
 
-- **Merge the best LoRA checkpoint into the expanded base model**
-```bash
-cd basemodel
-python3 merge_model.py
-```
-Edit `lora_model_path` inside `basemodel/merge_model.py` so it targets the checkpoint you want to merge. The script combines the LoRA weights with `basemodel/Qwen3-1-7B-expand/` and saves the full model to `basemodel/merged_beauty_model_1-1/`.
+- **Stage 1: Token Warm-up (Interleaved User Persona Grounding)**
+  ```bash
+  bash run_training_stage1.sh
+  ```
+  Uses `training_align_data_{train,val}.parquet` and trains only new token embeddings (LLM backbone frozen via TrainableTokensConfig).
 
-### 4. Prepare Recommendation Training Corpora
-- **Generate SID-only recommendation data**
-```bash
-cd data
-python3 generate_sid_prediction_data.py
-python3 generate_RA_data.py
-```
-These scripts consume the sequential data and Beauty metadata, producing `training_prediction_sid_data_{train,val,test}.parquet` for recommendation training and `training_RA_{train,val,test}.parquet` for the reasoning activation stage.
+- **Merge warm-up into base model**
+  ```bash
+  cd ../basemodel
+  python merge_model.py  # update lora_model_path inside if needed
+  ```
+  Output: `basemodel/merged_beauty_model_1-1/`
 
-### 5. Run the Combined Training Pipeline (Recommendation + CoT)
-```bash
-cd train
-bash run_training_stage2.sh
-```
-This helper first executes the recommendation training (via `scripts/run_training_rec.sh`), waits for it to finish, captures the latest `checkpoint-*` under `results/beauty_sid_rec/`, and then launches the reasoning activation training (via `scripts/run_training_RA.sh`) with that checkpoint. After it completes, you will have both the recommendation checkpoints and the CoT-enhanced checkpoints under `results/ReasoningActivation/`.
+- **Stage 2: Multi-Task Integration (4 tasks)**
+  ```bash
+  cd ../train
+  bash run_training_stage2.sh
+  ```
+  Uses `training_multitask_data_{train,val}.parquet` with task ratios alignment/sequential/caption/general = 0.3/0.3/0.2/0.2. Trains all model parameters.
 
-### 6. (Optional) Train the Recommendation Model Only
-```bash
-cd train
-bash scripts/run_training_rec.sh
-```
-Ensure `MODEL_DIR` points to `basemodel/merged_beauty_model_1-1/` (or your merged output) and that the train/val parquet paths reference the freshly generated SID prediction files. The script writes checkpoints to `train/results/beauty_sid_rec/`. (Skip this step if you already ran the combined pipeline above.)
+- **Stage 3: Reasoning Activation (CoT)**
+  ```bash
+  bash run_training_stage3.sh
+  ```
+  Loads the latest Stage-2 checkpoint and adds CoT reasoning.
 
-### 7. (Optional) Train the Reasoning Activation (CoT) Model Separately
-- **Manual two-step execution**
-  1. Identify the best recommendation checkpoint (e.g., `train/results/beauty_sid_rec/checkpoint-XXXX`).
-  2. Pass that directory to the RA trainer:
-     ```bash
-     cd train
-     bash scripts/run_training_RA.sh /path/to/beauty_sid_rec/checkpoint-XXXX
-     ```
+### 4) Notes and evaluation
+- Stage-2 data guardrails: `run_training_stage2.sh` will prompt you to generate general data (HF_TOKEN) and multitask parquet if missing.
+- Stage-1 data guardrails: `run_training_stage1.sh` checks for alignment parquet and points to `generate_training_data.py` if absent.
+- Evaluation scripts under `test/` remain the same; point them to the checkpoints produced in `train/results/`.
 
-### 8. Evaluate the Models
-- **Direct recommendation model (no CoT)**
-```bash
-cd test
-bash eval_parallel_8gpu.sh
-```
-Update `MERGED_MODEL_PATH` and `TEST_PARQUET` to target the checkpoint produced by the recommendation training (either from the combined pipeline or the standalone run).
+### 5) Semantic ID (SID) construction pipeline
+- Requirements: `pip install -r data/requirements_sid.txt`
+- Configurable bash: `scripts/pipeline/build_sids.sh`
+  - Defaults: k_clusters=1024, num_codebooks=3, model=Qwen/Qwen3-1.7B, output model dir `basemodel/Qwen3-1.7B-sid/`.
+  - Edit the CONFIG block at the top of the script for easy changes, or override via CLI flags.
+- Run:
+  ```bash
+  cd scripts/pipeline
+  OAI_API_KEY=... HF_TOKEN=... bash build_sids.sh
+  ```
+- Outputs:
+  - `data/sid_output/embeddings.npy`, `cluster_labels_cb*.npy`
+  - `data/sid_output/item_sid_mapping.json`, `items_with_sid.json` (adds `sid_list`)
+  - `data/sid_output/sid_vocab_used.txt`
+  - Expanded model/tokenizer with new SID tokens: `basemodel/Qwen3-1.7B-sid/` (default path)
 
-- **CoT-enhanced reasoning model**
-```bash
-cd test
-bash eval_parallel_8gpu_cot.sh
-```
-Point `MERGED_MODEL_PATH` to the directory output by the reasoning activation training (typically under `train/results/ReasoningActivation/epoch_*/`; generated automatically when running the combined pipeline). This script evaluates the CoT-first, then recommendation pipeline.
+SID token format:
+- One token per codebook: `<|sid_begin|><cb_{codebook_idx}_{cluster_id}><|sid_end|>`
+- Tokens are auto-added to the tokenizer and the model embedding matrix is resized by the script.
+
+### 6) Data build pipeline notes
+- Script: `scripts/pipeline/build_training_data.sh`
+- By default it assumes item/user summaries already exist and skips regenerating them if:
+  - `data/Beauty.pretrain.with_summaries.json` exists (skip unless `FORCE_REGEN_ITEM_SUMMARIES=1`)
+  - `data/user_summaries.json` exists (skip unless `FORCE_REGEN_USER_SUMMARIES=1`)
+- Otherwise it generates:
+  1) Item summaries (OpenAI)
+  2) User summaries (OpenAI)
+  3) Alignment data
+  4) Sequential prediction data
+  5) Item captioning data
+  6) General corpus (HF)
+  7) Multi-task combined data

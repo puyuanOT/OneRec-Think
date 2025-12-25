@@ -2,10 +2,26 @@
 import json
 import pandas as pd
 
-def generate_training_data(sequential_file, beauty_items_file, output_train_file, output_val_file, output_test_file):
+def generate_training_data(
+    sequential_file,
+    beauty_items_file,
+    output_train_file,
+    output_val_file,
+    output_test_file,
+    user_summaries_file=None,
+):
     try:
         with open(beauty_items_file, 'r', encoding='utf-8') as f:
             beauty_items = json.load(f)
+
+        user_summaries = {}
+        if user_summaries_file:
+            try:
+                with open(user_summaries_file, 'r', encoding='utf-8') as f:
+                    user_summaries = json.load(f)
+                print(f"Loaded {len(user_summaries)} user summaries")
+            except FileNotFoundError:
+                print(f"User summaries file not found: {user_summaries_file} (continuing without summaries)")
 
         with open(sequential_file, 'r', encoding='utf-8') as f:
             lines = f.readlines()
@@ -35,7 +51,13 @@ def generate_training_data(sequential_file, beauty_items_file, output_train_file
                 else:
                     local_missing_count += 1
 
-            return item_descriptions, local_missing_count
+            user_summary = ""
+            if user_summaries_file:
+                summary_entry = user_summaries.get(user_id)
+                if summary_entry:
+                    user_summary = summary_entry.get("user_summary", "")
+
+            return item_descriptions, local_missing_count, user_summary
 
         for i, line in enumerate(lines):
             line = line.strip()
@@ -49,11 +71,13 @@ def generate_training_data(sequential_file, beauty_items_file, output_train_file
             user_id = elements[0]
             item_ids = elements[1:]
 
-            full_item_descriptions, missing_count_full = build_description(item_ids, user_id)
+            full_item_descriptions, missing_count_full, user_summary = build_description(item_ids, user_id)
             missing_items_count += missing_count_full
 
             if full_item_descriptions:
-                test_description = "The user has purchased the following items: " + "; ".join(full_item_descriptions) + ";"
+                header = "The user has purchased the following items: " + "; ".join(full_item_descriptions) + ";"
+                summary = f"User Summary: {user_summary}" if user_summary else "User Summary: Unknown."
+                test_description = f"{header} {summary}"
                 training_data_test.append({
                     'user_id': user_id,
                     'description': test_description
@@ -61,11 +85,13 @@ def generate_training_data(sequential_file, beauty_items_file, output_train_file
 
             if len(item_ids) > 1:
                 val_item_ids = item_ids[:-1]
-                val_item_descriptions, missing_count_val = build_description(val_item_ids, user_id)
+                val_item_descriptions, missing_count_val, user_summary = build_description(val_item_ids, user_id)
                 missing_items_count += missing_count_val
 
                 if val_item_descriptions:
-                    val_description = "The user has purchased the following items: " + "; ".join(val_item_descriptions) + ";"
+                    header = "The user has purchased the following items: " + "; ".join(val_item_descriptions) + ";"
+                    summary = f"User Summary: {user_summary}" if user_summary else "User Summary: Unknown."
+                    val_description = f"{header} {summary}"
                     training_data_val.append({
                         'user_id': user_id,
                         'description': val_description
@@ -73,11 +99,13 @@ def generate_training_data(sequential_file, beauty_items_file, output_train_file
 
             if len(item_ids) > 2:
                 train_item_ids = item_ids[:-2]
-                train_item_descriptions, missing_count_train = build_description(train_item_ids, user_id)
+                train_item_descriptions, missing_count_train, user_summary = build_description(train_item_ids, user_id)
                 missing_items_count += missing_count_train
 
                 if train_item_descriptions:
-                    train_description = "The user has purchased the following items: " + "; ".join(train_item_descriptions) + ";"
+                    header = "The user has purchased the following items: " + "; ".join(train_item_descriptions) + ";"
+                    summary = f"User Summary: {user_summary}" if user_summary else "User Summary: Unknown."
+                    train_description = f"{header} {summary}"
                     training_data_train.append({
                         'user_id': user_id,
                         'description': train_description
@@ -99,6 +127,7 @@ def generate_training_data(sequential_file, beauty_items_file, output_train_file
 if __name__ == "__main__":
     sequential_file = "./sequential_data_processed.txt"
     beauty_items_file = "./Beauty.pretrain.json"
+    user_summaries_file = "./user_summaries.json"
     output_train_file = "./training_align_data_train.parquet"
     output_val_file = "./training_align_data_val.parquet"
     output_test_file = "./training_align_data_test.parquet"
@@ -108,5 +137,6 @@ if __name__ == "__main__":
         beauty_items_file,
         output_train_file,
         output_val_file,
-        output_test_file
+        output_test_file,
+        user_summaries_file=user_summaries_file,
     )

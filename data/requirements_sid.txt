@@ -1,0 +1,7 @@
+faiss-cpu
+langchain
+langchain-openai
+transformers
+torch
+accelerate
+

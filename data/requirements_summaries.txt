@@ -1,0 +1,6 @@
+# Requirements for generate_item_summaries.py
+langchain>=0.1.0
+langchain-openai>=0.0.5
+openai>=1.0.0
+tqdm>=4.65.0
+

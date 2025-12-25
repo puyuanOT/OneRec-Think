@@ -1,0 +1,29 @@
+# Environments
+.venv*/
+*.pyc
+__pycache__/
+
+# Large / generated model artifacts
+basemodel/Qwen3-1-7B/
+basemodel/Qwen3-1-7B-expand/
+basemodel/merged_beauty_model_*/
+train/results/
+train/logs/
+
+# Training outputs / checkpoints / logs
+*.log
+*.ckpt
+
+# Generated data (parquet, downloads, etc.)
+data/*.parquet
+data/sid_output/**
+
+# Keep raw and OAI-generated JSONs
+!data/Beauty.pretrain.json
+!data/Beauty.pretrain.with_summaries.json
+!data/sequential_data_processed.txt
+!data/user_summaries.json
+
+# Misc
+.DS_Store
+
