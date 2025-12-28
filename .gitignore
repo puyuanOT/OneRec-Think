@@ -7,12 +7,15 @@ __pycache__/
 basemodel/Qwen3-1-7B/
 basemodel/Qwen3-1-7B-expand/
 basemodel/merged_beauty_model_*/
+basemodel/Qwen3-1.7B-sid/
 train/results/
 train/logs/
 
 # Training outputs / checkpoints / logs
 *.log
 *.ckpt
+wandb/
+train/wandb/
 
 # Generated data (parquet, downloads, etc.)
 data/*.parquet

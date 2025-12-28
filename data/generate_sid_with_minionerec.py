@@ -118,7 +118,7 @@ def main():
     for cb in range(args.num_codebooks):
         start = cb * sub_d
         end = d if cb == args.num_codebooks - 1 else (cb + 1) * sub_d
-        x_sub = x[:, start:end]
+        x_sub = np.ascontiguousarray(x[:, start:end])
         k_eff = min(args.k_clusters, x_sub.shape[0])
         if k_eff < args.k_clusters:
             print(f"[warn] reducing k from {args.k_clusters} to {k_eff} for codebook {cb} (samples={x_sub.shape[0]})")

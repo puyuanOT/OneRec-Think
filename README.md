@@ -104,6 +104,75 @@ Runs from `train/`.
   ```
   Loads the latest Stage-2 checkpoint and adds CoT reasoning.
 
+### 3b) Reproducible setup & data/SID build (no re-summarization)
+Use these commands to recreate the environment, combine shipped summaries, generate SIDs (MiniOneRec-style with OpenAI `text-embedding-3-small`), and build all training parquet files. This path skips new OpenAI calls for item/user summarization because the shards are already provided.
+```bash
+cd /home/ubuntu/OneRec-Think
+
+# 0) Secrets (do NOT commit)
+export OAI_API_KEY="..." HF_TOKEN="..."
+
+# 1) Environment (conda optional; script falls back to .venv if conda is absent)
+bash setup_conda_env.sh
+source .venv/bin/activate  # only needed when conda is not present
+
+# 2) Combine shipped summary shards
+python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json
+python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json
+
+# 3) Build SIDs (embeds summaries with text-embedding-3-small, then Faiss KMeans)
+cd scripts/pipeline
+OAI_API_KEY=$OAI_API_KEY HF_TOKEN=$HF_TOKEN bash build_sids.sh \
+  --input_json ../data/Beauty.pretrain.with_summaries.json \
+  --output_dir ../data/sid_output \
+  --output_model_dir ../basemodel/Qwen3-1.7B-sid
+# If you see imbalance warnings, reduce clusters per codebook, e.g., --k_clusters 256.
+
+# 4) Merge sid_list into Beauty.pretrain.json and add a space-joined sid string (backup kept)
+cd ..
+python - <<'PY'
+import json, shutil, pathlib
+root = pathlib.Path('.')
+base = root / 'data' / 'Beauty.pretrain.json'
+sids = root / 'data' / 'sid_output' / 'items_with_sid.json'
+backup = root / 'data' / 'Beauty.pretrain.before_minionerec.json'
+if not backup.exists():
+    shutil.copy2(base, backup)
+with base.open('r', encoding='utf-8') as f:
+    items = json.load(f)
+with sids.open('r', encoding='utf-8') as f:
+    sid_items = json.load(f)
+for k, v in items.items():
+    sid_list = sid_items.get(k, {}).get('sid_list')
+    if not sid_list:
+        continue
+    v['sid_list'] = sid_list
+    v['sid'] = ' '.join(sid_list)
+with base.open('w', encoding='utf-8') as f:
+    json.dump(items, f, ensure_ascii=False)
+print("Merged sid_list/sid into Beauty.pretrain.json; backup at", backup)
+PY
+
+# 5) Build all training datasets (skips summarization because combined files exist)
+cd scripts/pipeline
+OAI_API_KEY=$OAI_API_KEY HF_TOKEN=$HF_TOKEN bash build_training_data.sh
+cd ..
+```
+
+### 3c) Stage-1 training (token warm-up) — minimal, no DeepSpeed
+Uses HF Trainer + PEFT TrainableTokens; logs to W&B.
+```bash
+cd /home/ubuntu/OneRec-Think
+source .venv/bin/activate  # or conda activate onerec-think
+export OAI_API_KEY="..." HF_TOKEN="..." \
+  WANDB_API_KEY="..." WANDB_PROJECT="onerec-think" \
+  WANDB_RUN_GROUP="stage1" WANDB_NAME="stage1-align" WANDB_MODE="online" \
+  TRANSFORMERS_NO_DEEPSPEED=1
+bash train/run_training_stage1.sh  # defaults: model=basemodel/Qwen3-1.7B-sid, bs=2, epochs=5, 1 GPU
+tail -f train/beauty_align.log
+```
+Adjust `PER_DEVICE_BATCH`, `EPOCHS`, `WANDB_*` via env vars if needed.
+
 ### 4) Notes and evaluation
 - Stage-2 data guardrails: `run_training_stage2.sh` will prompt you to generate general data (HF_TOKEN) and multitask parquet if missing.
 - Stage-1 data guardrails: `run_training_stage1.sh` checks for alignment parquet and points to `generate_training_data.py` if absent.
@@ -142,6 +211,28 @@ SID token format:
   5) Item captioning data
   6) General corpus (HF)
   7) Multi-task combined data
+
+### 6b) Fast path when summaries already exist
+- Combine the shipped shards (keeps you from calling OpenAI again):
+  ```bash
+  python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json
+  python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json
+  ```
+- Build SIDs with the MiniOneRec-style script (requires OpenAI embeddings and Faiss; install deps via `pip install -r data/requirements_sid.txt`):
+  ```bash
+  cd scripts/pipeline
+  OAI_API_KEY=... bash build_sids.sh \
+    --input_json ../data/Beauty.pretrain.with_summaries.json \
+    --output_dir ../data/sid_output \
+    --output_model_dir ../basemodel/Qwen3-1.7B-sid
+  ```
+  This first runs OpenAI `text-embedding-3-small` over every `ai_summary` to produce `embeddings.npy`, then clusters them to get SIDs. Outputs land in `data/sid_output/` (embeddings, cluster labels, `items_with_sid.json`, `sid_vocab_used.txt`) and the expanded model/tokenizer in `basemodel/Qwen3-1.7B-sid/`.
+- Build the training parquet with your existing summaries (generation steps are skipped if the combined files above exist):
+  ```bash
+  cd scripts/pipeline
+  OAI_API_KEY=... HF_TOKEN=... bash build_training_data.sh
+  ```
+  This produces `training_*` parquet files in `data/`. If you recompute SIDs and want downstream scripts to use them, merge `data/sid_output/items_with_sid.json` into your working `Beauty.pretrain.json` and, if needed, add a `sid` string per item (e.g., space-join `sid_list`, or use the single entry when `num_codebooks=1`) for scripts that expect a `sid` field.
 
 ### 7) Handling large JSONs (repo tracks shards, not full files)
 - Item summaries are stored as shards under 100MB each:

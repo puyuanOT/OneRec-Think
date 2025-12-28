@@ -1,96 +1,77 @@
 #!/bin/bash
 
-# Setup conda environment for OneRec-Think training
-# This script creates a conda environment with all dependencies needed to run the training pipeline
+# Setup environment for OneRec-Think training.
+# If conda is available, we create a conda env; otherwise we create a local venv (.venv).
 
-set -e
+set -euo pipefail
 
 ENV_NAME="onerec-think"
 PYTHON_VERSION="3.10"
+VENV_PATH=".venv"
 
 echo "========================================"
-echo "Setting up conda environment: ${ENV_NAME}"
+echo "Setting up environment for OneRec-Think"
 echo "========================================"
 
-# Check if conda is available
-if ! command -v conda &> /dev/null; then
-    echo "Error: conda is not installed or not in PATH"
-    exit 1
+if command -v conda >/dev/null 2>&1; then
+    echo "[info] conda detected, using conda environment '${ENV_NAME}'"
+    if conda env list | grep -q "^${ENV_NAME} "; then
+        echo "Removing existing environment: ${ENV_NAME}"
+        conda env remove -n ${ENV_NAME} -y
+    fi
+
+    echo "Creating new conda environment with Python ${PYTHON_VERSION}..."
+    conda create -n ${ENV_NAME} python=${PYTHON_VERSION} -y
+
+    echo "Activating environment..."
+    # shellcheck disable=SC1091
+    source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda activate ${ENV_NAME}
+else
+    echo "[warn] conda not found; falling back to python venv at ${VENV_PATH}"
+    python3 -m venv "${VENV_PATH}"
+    # shellcheck disable=SC1090
+    source "${VENV_PATH}/bin/activate"
 fi
 
-# Remove existing environment if it exists
-if conda env list | grep -q "^${ENV_NAME} "; then
-    echo "Removing existing environment: ${ENV_NAME}"
-    conda env remove -n ${ENV_NAME} -y
-fi
-
-# Create new conda environment
-echo "Creating new conda environment with Python ${PYTHON_VERSION}..."
-conda create -n ${ENV_NAME} python=${PYTHON_VERSION} -y
-
-# Activate environment
-echo "Activating environment..."
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate ${ENV_NAME}
-
-# Upgrade pip
 echo "Upgrading pip..."
 pip install --upgrade pip
 
-# Install PyTorch with CUDA support (adjust CUDA version as needed)
-echo "Installing PyTorch with CUDA 12.1..."
+echo "Installing numpy<2 and faiss-gpu..."
+pip install --no-cache-dir "numpy<2" faiss-gpu
+
+echo "Installing PyTorch (CUDA 12.1 wheels; adjust index URL if needed)..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Install transformers and related packages
-echo "Installing transformers and HuggingFace packages..."
-pip install transformers>=4.36.0
-pip install datasets
-pip install accelerate
-pip install huggingface-hub
+echo "Installing project requirements..."
+pip install -r data/requirements_sid.txt -r data/requirements_general.txt -r data/requirements_summaries.txt
+pip install pandas pyarrow
 
-# Install PEFT for LoRA training
-echo "Installing PEFT..."
-pip install peft
+echo "Installing training stack (no deepspeed; includes wandb)..."
+pip install -r train/requirements.txt
 
-# Install DeepSpeed for distributed training
-echo "Installing DeepSpeed..."
-pip install deepspeed
-
-# Install vLLM for fast inference
-echo "Installing vLLM..."
-pip install vllm
-
-# Install data processing libraries
-echo "Installing data processing libraries..."
-pip install pandas
-pip install pyarrow
-pip install numpy
-
-# Install utility packages
-echo "Installing utility packages..."
-pip install tqdm
-pip install sentencepiece
-pip install protobuf
-
-# Verify installations
 echo ""
 echo "========================================"
 echo "Verifying installations..."
 echo "========================================"
-
-python -c "import torch; print(f'PyTorch version: {torch.__version__}')"
-python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
-python -c "import torch; print(f'CUDA version: {torch.version.cuda}')"
-python -c "import transformers; print(f'Transformers version: {transformers.__version__}')"
-python -c "import deepspeed; print(f'DeepSpeed version: {deepspeed.__version__}')"
-python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
-python -c "import peft; print(f'PEFT version: {peft.__version__}')"
-python -c "import pandas; print(f'Pandas version: {pandas.__version__}')"
+python - <<'PY'
+import torch, transformers, accelerate, peft, pandas, wandb
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+print(f"CUDA version: {torch.version.cuda}")
+print(f"Transformers version: {transformers.__version__}")
+print(f"Accelerate version: {accelerate.__version__}")
+print(f"PEFT version: {peft.__version__}")
+print(f"Pandas version: {pandas.__version__}")
+print(f"W&B version: {wandb.__version__}")
+PY
 
 echo ""
 echo "========================================"
 echo "Environment setup complete!"
 echo "========================================"
-echo ""
-echo "To activate the environment, run:"
-echo "    conda activate ${ENV_NAME}"
+if command -v conda >/dev/null 2>&1; then
+  echo "To activate the environment, run: conda activate ${ENV_NAME}"
+else
+  echo "To activate the environment, run: source ${VENV_PATH}/bin/activate"
+fi

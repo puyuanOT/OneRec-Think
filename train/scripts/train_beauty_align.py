@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List
 
 import pandas as pd
 from datasets import Dataset
@@ -61,18 +62,35 @@ def tokenize_function(examples, tokenizer):
     )
     return tokenized
 
-def get_special_tokens():
-    special_tokens = []
+def load_sid_tokens(tokenizer, sid_vocab_file: Path | None = None) -> List[str]:
+    """
+    Load SID tokens to warm up. Priority:
+    1) If sid_vocab_file exists, load lines from it.
+    2) Otherwise, select tokens in the tokenizer that contain '<cb_' (MiniOneRec-style SIDs).
+    Always include <|sid_begin|> and <|sid_end|> when present.
+    """
+    tokens: List[str] = []
 
-    special_tokens.append('<|sid_begin|>')
-    special_tokens.append('<|sid_end|>')
+    if sid_vocab_file and sid_vocab_file.exists():
+        with sid_vocab_file.open("r", encoding="utf-8") as f:
+            tokens = [line.strip() for line in f if line.strip()]
+    else:
+        vocab_tokens = tokenizer.get_vocab().keys()
+        tokens = [t for t in vocab_tokens if "<cb_" in t]
 
-    max_range = 256
-    for prefix in ['s_a', 's_b', 's_c', 's_d']:
-        for i in range(max_range):
-            special_tokens.append(f'<{prefix}_{i}>')
-    
-    return special_tokens
+    # Add boundary markers if present in vocab
+    for marker in ("<|sid_begin|>", "<|sid_end|>"):
+        if marker in tokenizer.get_vocab():
+            tokens.append(marker)
+
+    # de-dup while preserving order
+    seen = set()
+    uniq_tokens = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            uniq_tokens.append(t)
+    return uniq_tokens
 
 if __name__ == "__main__":
     parser = HfArgumentParser((BeautyScriptArguments, TrainingArguments))
@@ -110,8 +128,9 @@ if __name__ == "__main__":
     print(f"Model loaded successfully")
     print(f"Tokenizer vocab size: {tokenizer.vocab_size}")
 
-    special_tokens = get_special_tokens()
-    print(f"Total special tokens: {len(special_tokens)}")
+    sid_vocab_file = Path(script_args.train_data_path).parent / "sid_output" / "sid_vocab_used.txt"
+    special_tokens = load_sid_tokens(tokenizer, sid_vocab_file=sid_vocab_file)
+    print(f"Total special tokens (from sid_vocab): {len(special_tokens)}")
 
     tokenized_special_tokens = tokenizer.convert_tokens_to_ids(special_tokens)
 
@@ -122,6 +141,9 @@ if __name__ == "__main__":
             valid_special_token_ids.append(token_id)
             valid_special_tokens.append(special_tokens[i])
     
+    if len(valid_special_token_ids) == 0:
+        raise ValueError("No valid SID tokens found in tokenizer. Ensure the SID-expanded tokenizer is used and sid_vocab_used.txt exists.")
+
     print(f"Valid special tokens: {len(valid_special_token_ids)}")
     print(f"First 10 valid special tokens: {valid_special_tokens[:10]}")
     print(f"Training token IDs range: {min(valid_special_token_ids)} to {max(valid_special_token_ids)}")

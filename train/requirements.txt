@@ -1,0 +1,9 @@
+accelerate>=0.21.0
+transformers>=4.36.0
+peft
+datasets
+wandb
+tqdm
+sentencepiece
+protobuf
+
