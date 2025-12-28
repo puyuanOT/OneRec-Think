@@ -142,3 +142,27 @@ SID token format:
   5) Item captioning data
   6) General corpus (HF)
   7) Multi-task combined data
+
+### 7) Handling large JSONs (repo tracks shards, not full files)
+- Item summaries are stored as shards under 100MB each:
+  - `data/Beauty.pretrain.with_summaries.part01.json` … `part04.json`
+  - Recombine when needed:
+    ```bash
+    python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json
+    ```
+- User summaries are also sharded:
+  - `data/user_summaries.part01.json` … `part06.json`
+  - Recombine:
+    ```bash
+    python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json
+    ```
+- To re-split a combined file (if regenerated locally):
+  ```bash
+  python data/split_json_dict.py --input data/Beauty.pretrain.with_summaries.json --output_dir data --prefix Beauty.pretrain.with_summaries.part --max_items_per_file 4000
+  python data/split_json_dict.py --input data/user_summaries.json --output_dir data --prefix user_summaries.part --max_items_per_file 4000
+  ```
+
+### 8) GH200 (ARM64 + H100) setup notes
+- Install a CUDA-enabled aarch64 PyTorch build (CUDA ≥ 12.2 / SM90). Follow PyTorch’s official selector for ARM + CUDA; verify with `python - <<'PY'\nimport torch; print(torch.cuda.is_available(), torch.version.cuda)\nPY`.
+- For SID pipeline, prefer GPU Faiss on GH200: `pip install faiss-gpu` (or build Faiss with CUDA for aarch64). The requirements file now lists `faiss-gpu`; if a wheel is unavailable for your platform, build from source.
+- Ensure CUDA libs/drivers are visible to Python (e.g., `LD_LIBRARY_PATH`/`PATH`), and run the training scripts after activating the environment with the CUDA-enabled torch/Faiss.

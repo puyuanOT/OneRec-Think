@@ -1,4 +1,4 @@
-faiss-cpu
+faiss-gpu
 langchain
 langchain-openai
 transformers
