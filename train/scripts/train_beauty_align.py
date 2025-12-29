@@ -143,7 +143,7 @@ if __name__ == "__main__":
     
     if len(valid_special_token_ids) == 0:
         raise ValueError("No valid SID tokens found in tokenizer. Ensure the SID-expanded tokenizer is used and sid_vocab_used.txt exists.")
-
+    
     print(f"Valid special tokens: {len(valid_special_token_ids)}")
     print(f"First 10 valid special tokens: {valid_special_tokens[:10]}")
     print(f"Training token IDs range: {min(valid_special_token_ids)} to {max(valid_special_token_ids)}")

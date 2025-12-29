@@ -11,7 +11,9 @@ TRAIN_DATA="${TRAIN_DATA:-../data/training_align_data_train.parquet}"
 VAL_DATA="${VAL_DATA:-../data/training_align_data_val.parquet}"
 NUM_GPUS="${NUM_GPUS:-1}"  # ignored when running without deepspeed launcher
 PER_DEVICE_BATCH="${PER_DEVICE_BATCH:-2}"
+PER_DEVICE_EVAL_BATCH="${PER_DEVICE_EVAL_BATCH:-1}"
 EPOCHS="${EPOCHS:-5}"
+EVAL_ON_START="${EVAL_ON_START:-True}"
 HOSTFILE="${HOSTFILE:-}"
 LOG_FILE="${LOG_FILE:-beauty_align.log}"
 OUTPUT_DIR="${OUTPUT_DIR:-./results/beauty_align}"
@@ -32,13 +34,26 @@ echo "[stage1] model=${MODEL_DIR}"
 echo "[stage1] train=${TRAIN_DATA}"
 echo "[stage1] val=${VAL_DATA}"
 echo "[stage1] gpus=${NUM_GPUS} hostfile=${HOSTFILE:-<none>}"
-echo "[stage1] per_device_batch=${PER_DEVICE_BATCH} epochs=${EPOCHS}"
+echo "[stage1] per_device_batch=${PER_DEVICE_BATCH} per_device_eval_batch=${PER_DEVICE_EVAL_BATCH} epochs=${EPOCHS}"
+echo "[stage1] eval_on_start=${EVAL_ON_START}"
 echo "[stage1] logging to ${LOG_FILE}"
 
 export TRANSFORMERS_NO_DEEPSPEED=1
 export WANDB_PROJECT="${WANDB_PROJECT:-onerec-think}"
 export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-stage1}"
-export WANDB_NAME="${WANDB_NAME:-stage1-align}"
+# Auto-stamp the run name with a coarse time-of-day bucket. Override WANDB_NAME externally to bypass.
+if [[ -z "${WANDB_NAME:-}" ]]; then
+  HOUR=$(date +%H)
+  case ${HOUR} in
+    05|06|07|08|09|10) TOD="early-morning" ;;
+    11|12|13)          TOD="noon" ;;
+    14|15|16)          TOD="afternoon" ;;
+    17|18|19)          TOD="early-night" ;;
+    20|21|22)          TOD="late-night" ;;
+    *)                 TOD="middle-night" ;;
+  esac
+  export WANDB_NAME="stage1-align-$(date +%Y-%m-%d)-${TOD}"
+fi
 export WANDB_MODE="${WANDB_MODE:-online}"
 
 DEEPSPEED_HOST_ARGS=()
@@ -52,6 +67,7 @@ nohup python ./scripts/train_beauty_align.py \
     --train_data_path "${TRAIN_DATA}" \
     --val_data_path "${VAL_DATA}" \
     --per_device_train_batch_size "${PER_DEVICE_BATCH}" \
+    --per_device_eval_batch_size "${PER_DEVICE_EVAL_BATCH}" \
     --num_train_epochs "${EPOCHS}" \
     --gradient_checkpointing True \
     --bf16 True \
@@ -60,7 +76,7 @@ nohup python ./scripts/train_beauty_align.py \
     --logging_steps 10 \
     --report_to wandb \
     --eval_strategy epoch \
-    --eval_on_start False \
+    --eval_on_start "${EVAL_ON_START}" \
     --save_strategy epoch \
     --save_total_limit 5 \
     --metric_for_best_model eval_loss \

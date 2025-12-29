@@ -20,6 +20,7 @@ train/wandb/
 # Generated data (parquet, downloads, etc.)
 data/*.parquet
 data/sid_output/**
+data/Beauty.pretrain.before_minionerec.json
 
 # Keep raw and OAI-generated JSONs (but ignore the large combined summaries file)
 !data/Beauty.pretrain.json
