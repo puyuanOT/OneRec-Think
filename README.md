@@ -75,34 +75,23 @@ All commands below run from `data/`. A lightweight venv already exists at `.venv
    # outputs training_multitask_data_{train,val,test}.parquet
    ```
 
-### 3) Training pipeline
-Runs from `train/`.
+### 3) Training pipelines (single GPU vs multi GPU)
+All scripts live under `train/`. Top-level `run_training_stage*.sh` now delegate to `train/single_gpu/` by default; multi-GPU (DeepSpeed) scripts are under `train/multi_gpu/`.
 
-- **Stage 1: Token Warm-up (Interleaved User Persona Grounding)**
-  ```bash
-  bash run_training_stage1.sh
-  ```
-  Uses `training_align_data_{train,val}.parquet` and trains only new token embeddings (LLM backbone frozen via TrainableTokensConfig).
+- **Single GPU (recommended here)**
+  - Stage 1 (warm-up, embeddings only): `bash train/single_gpu/stage1.sh`
+  - Stage 2 (multi-task, LoRA, bs=1, seq=4096): `bash train/single_gpu/stage2.sh`
+    - Auto-merges Stage-1 adapter into `basemodel/Qwen3-1.7B-stage1-merged`
+  - Stage 3 (RA, LoRA, bs=1): `bash train/single_gpu/stage3.sh`
 
-- **Merge warm-up into base model**
-  ```bash
-  cd ../basemodel
-  python merge_model.py  # update lora_model_path inside if needed
-  ```
-  Output: `basemodel/merged_beauty_model_1-1/`
+- **Multi GPU (DeepSpeed, original)**
+  - Stage 1: `bash train/multi_gpu/stage1.sh`
+  - Stage 2: `bash train/multi_gpu/stage2.sh`
+  - Stage 3: `bash train/multi_gpu/stage3.sh`
 
-- **Stage 2: Multi-Task Integration (4 tasks)**
-  ```bash
-  cd ../train
-  bash run_training_stage2.sh
-  ```
-  Uses `training_multitask_data_{train,val}.parquet` with task ratios alignment/sequential/caption/general = 0.3/0.3/0.2/0.2. Trains all model parameters.
-
-- **Stage 3: Reasoning Activation (CoT)**
-  ```bash
-  bash run_training_stage3.sh
-  ```
-  Loads the latest Stage-2 checkpoint and adds CoT reasoning.
+Notes:
+- Default W&B naming auto-stamps time-of-day; override `WANDB_NAME` if desired.
+- For Stage 2/3 single GPU we keep seq length 4096; batch sizes are set to 1 to fit.
 
 ### 3b) Reproducible setup & data/SID build (no re-summarization)
 Use these commands to recreate the environment, combine shipped summaries, generate SIDs (MiniOneRec-style with OpenAI `text-embedding-3-small`), and build all training parquet files. This path skips new OpenAI calls for item/user summarization because the shards are already provided.

@@ -11,7 +11,7 @@ DEEPSPEED_CMD=(
     deepspeed
     --hostfile=./scripts/hostfile
     --num_gpus 8
-    ./scripts/train_beauty_multitask.py
+    ./scripts/train_multitask.py
     --model_name_or_path "${MODEL_DIR}"
     --train_data_path "${TRAIN_DATA}"
     --val_data_path "${VAL_DATA}"

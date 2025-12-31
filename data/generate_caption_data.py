@@ -8,8 +8,35 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 import pandas as pd
+
+
+sid_block_pattern = re.compile(r"(?:<\|sid_begin\|>.*?<\|sid_end\|>)(?:\s*<\|sid_begin\|>.*?<\|sid_end\|>)*")
+sid_inner = re.compile(r"<\|sid_begin\|>(.*?)<\|sid_end\|>")
+
+def collapse_sid_list(sid_list):
+    """Collapse a list of SID tokens into one <|item_begin|>...<|item_end|> block."""
+    parts = []
+    for sid in sid_list:
+        inner = sid.replace("<|sid_begin|>", "").replace("<|sid_end|>", "").strip()
+        if inner:
+            parts.append(inner)
+    return "<|item_begin|>" + "".join(parts) + "<|item_end|>"
+
+
+def collapse_sid_string(sid_str: str) -> str:
+    """Collapse a SID string containing <|sid_begin|>...<|sid_end|> into one item block."""
+    def repl(match: re.Match) -> str:
+        group = match.group(0)
+        parts = []
+        for inner in sid_inner.findall(group):
+            inner = inner.strip()
+            if inner:
+                parts.append(inner)
+        return "<|item_begin|>" + "".join(parts) + "<|item_end|>"
+    return sid_block_pattern.sub(repl, sid_str)
 
 
 def load_beauty_items(beauty_items_file: Path) -> dict:
@@ -45,7 +72,14 @@ def generate_caption_data(
     val_end = train_end + int(total_items * val_ratio)
 
     for idx, (item_id, item_info) in enumerate(items_list):
-        sid = item_info.get("sid", "")
+        sid_list = item_info.get("sid_list")
+        sid = ""
+        if sid_list:
+            sid = collapse_sid_list(sid_list)
+        else:
+            sid_raw = item_info.get("sid", "")
+            if sid_raw:
+                sid = collapse_sid_string(sid_raw)
         # Prefer AI-generated summary when available
         description = item_info.get("ai_summary") or item_info.get("description", "")
         title = item_info.get("title", "")
@@ -109,7 +143,10 @@ def generate_caption_data(
 
 
 if __name__ == "__main__":
-    beauty_items_file = Path("./Beauty.pretrain.with_summaries.json")
+    default_items = Path("./sid_output/items_with_sid.json")
+    if not default_items.exists():
+        default_items = Path("./Beauty.pretrain.json")
+    beauty_items_file = default_items
     output_train = Path("./training_caption_data_train.parquet")
     output_val = Path("./training_caption_data_val.parquet")
     output_test = Path("./training_caption_data_test.parquet")

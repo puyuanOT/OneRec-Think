@@ -2,18 +2,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}"
+cd "${SCRIPT_DIR}/.."
 
-MULTITASK_SCRIPT="${SCRIPT_DIR}/scripts/run_training_multitask.sh"
-MULTITASK_RESULTS_DIR="${SCRIPT_DIR}/results/beauty_multitask"
-MULTITASK_PROCESS_PATTERN="train_beauty_multitask.py"
+MULTITASK_SCRIPT="${SCRIPT_DIR}/../scripts/run_training_multitask.sh"
+MULTITASK_RESULTS_DIR="${SCRIPT_DIR}/../results/beauty_multitask"
+MULTITASK_PROCESS_PATTERN="train_multitask.py"
 
 if [[ ! -x "${MULTITASK_SCRIPT}" ]]; then
     echo "Error: ${MULTITASK_SCRIPT} not found or not executable." >&2
     exit 1
 fi
 
-echo "=== Stage 2: Multi-Task Integration Training ==="
+echo "=== Stage 2: Multi-Task Integration Training (multi-GPU, DeepSpeed) ==="
 echo "This stage trains on all 4 tasks:"
 echo "  - Interleaved User Persona Grounding"
 echo "  - Sequential Preference Modeling"
@@ -39,7 +39,7 @@ bash "${MULTITASK_SCRIPT}"
 echo ""
 echo "Waiting for multi-task training process to complete..."
 sleep 10
-while pgrep -f "${MULTITASK_PROCESS_PATTERN}" > /dev/null; do
+while pgrep -f "${MULTITASK_PROCESS_PATTERN}" > 0; do
     sleep 60
 done
 echo "Multi-task training finished."
@@ -60,4 +60,6 @@ echo "Stage 2 (Multi-Task Integration) completed successfully."
 echo "Latest checkpoint: ${last_checkpoint}"
 echo ""
 echo "Next step: Run Stage 3 (Reasoning Activation) with:"
-echo "  bash run_training_stage3.sh"
+echo "  bash stage3.sh"
+
+
