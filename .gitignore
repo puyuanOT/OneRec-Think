@@ -4,10 +4,7 @@
 __pycache__/
 
 # Large / generated model artifacts
-basemodel/Qwen3-1-7B/
-basemodel/Qwen3-1-7B-expand/
-basemodel/merged_beauty_model_*/
-basemodel/Qwen3-1.7B-sid/
+basemodel/
 train/results/
 train/logs/
 
