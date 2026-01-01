@@ -58,6 +58,9 @@ def get_special_tokens():
     special_tokens = []
     special_tokens.append('<|sid_begin|>')
     special_tokens.append('<|sid_end|>')
+    # Also keep item boundaries consistent with training data
+    special_tokens.append('<|item_begin|>')
+    special_tokens.append('<|item_end|>')
     max_range = 256
     for prefix in ['s_a', 's_b', 's_c', 's_d']:
         for i in range(max_range):
@@ -284,6 +287,30 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained(str(model_dir))
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
     tokenizer.pad_token = tokenizer.eos_token
+
+    # Ensure item/sid boundary tokens exist (so they don't get split to UNKs)
+    boundary_tokens = ["<|item_begin|>", "<|item_end|>", "<|sid_begin|>", "<|sid_end|>"]
+    new_tokens = [t for t in boundary_tokens if tokenizer.convert_tokens_to_ids(t) == tokenizer.unk_token_id]
+    if new_tokens:
+        added = tokenizer.add_tokens(new_tokens)
+        print(f"Added {added} boundary tokens to tokenizer: {new_tokens}")
+        model.resize_token_embeddings(len(tokenizer))
+
+    # Add bare cb_* tokens from sid vocab so collapsed item blocks tokenize as intended
+    import re
+    sid_vocab_file = Path("../sid_output/sid_vocab_used.txt")
+    cb_tokens: List[str] = []
+    if sid_vocab_file.exists():
+        pat = re.compile("<cb_\\d+_\\d+>")
+        with sid_vocab_file.open("r", encoding="utf-8") as f:
+            for line in f:
+                cb_tokens.extend(pat.findall(line))
+    cb_tokens = list(dict.fromkeys(cb_tokens))
+    new_cb_tokens = [t for t in cb_tokens if tokenizer.convert_tokens_to_ids(t) == tokenizer.unk_token_id]
+    if new_cb_tokens:
+        added = tokenizer.add_tokens(new_cb_tokens)
+        print(f"Added {added} cb_* tokens to tokenizer from sid vocab: {len(new_cb_tokens)}")
+        model.resize_token_embeddings(len(tokenizer))
     
     if training_args.local_rank == 0:
         print(f"Model loaded successfully")

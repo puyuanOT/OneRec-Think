@@ -22,16 +22,18 @@ bash setup_conda_env.sh
 ```
 
 ### 1) Obtain and expand the base model
-- Download Qwen3-1.7B:
+- Recommended one-liner (downloads + expands vocab with cb_* SIDs):
+  ```bash
+  HF_TOKEN=... bash scripts/prepare_basemodel.sh
+  ```
+  - Downloads `basemodel/Qwen3-1.7B/` if missing.
+  - Expands to `basemodel/Qwen3-1.7B-sid/` using `sid_output/sid_vocab_used.txt`.
+- Manual (if you prefer the individual steps):
   ```bash
   cd basemodel
-  python download_basemodel.py
+  HF_TOKEN=... python download_basemodel.py          # -> basemodel/Qwen3-1.7B/
+  python expand_vocab.py                             # -> basemodel/Qwen3-1.7B-sid/
   ```
-- Expand vocabulary with SID tokens:
-  ```bash
-  python expand_vocab.py
-  ```
-  Output: `basemodel/Qwen3-1-7B-expand/`
 
 ### 2) Prepare data (four tasks + supporting summaries)
 All commands below run from `data/`. A lightweight venv already exists at `.venv_summaries`; activate it if desired.
@@ -157,7 +159,7 @@ export OAI_API_KEY="..." HF_TOKEN="..." \
   WANDB_API_KEY="..." WANDB_PROJECT="onerec-think" \
   WANDB_RUN_GROUP="stage1" WANDB_NAME="stage1-align" WANDB_MODE="online" \
   TRANSFORMERS_NO_DEEPSPEED=1
-bash train/run_training_stage1.sh  # defaults: model=basemodel/Qwen3-1.7B-sid, bs=2, epochs=5, 1 GPU
+bash train/single_gpu/stage1.sh  # defaults: model=basemodel/Qwen3-1.7B-sid, bs=2, epochs=6, eval_on_start=True
 tail -f train/beauty_align.log
 ```
 Adjust `PER_DEVICE_BATCH`, `EPOCHS`, `WANDB_*` via env vars if needed.

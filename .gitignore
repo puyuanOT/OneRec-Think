@@ -5,6 +5,9 @@ __pycache__/
 
 # Large / generated model artifacts
 basemodel/
+!basemodel/expand_vocab.py
+!basemodel/download_basemodel.py
+!basemodel/merge_model.py
 train/results/
 train/logs/
 
