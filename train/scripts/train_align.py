@@ -100,29 +100,24 @@ def load_sid_tokens(tokenizer, sid_vocab_file: Path | None = None) -> List[str]:
     Always include <|sid_begin|>, <|sid_end|>, <|item_begin|>, <|item_end|> when present.
     """
     tokens: List[str] = []
-    cb_tokens: List[str] = []
+
+    # Helper to extract cb_* tokens from a sid vocab file
+    def extract_cb_tokens(path: Path) -> List[str]:
+        if not path.exists():
+            return []
+        pat = re.compile(r"<cb_\d+_\d+>")
+        text = path.read_text(encoding="utf-8")
+        return pat.findall(text)
 
     if sid_vocab_file and sid_vocab_file.exists():
-        with sid_vocab_file.open("r", encoding="utf-8") as f:
-            tokens = [line.strip() for line in f if line.strip()]
-        # Extract bare cb_* tokens from wrapped sids
-        for t in tokens:
-            for part in t.split(">"):
-                if "<cb_" in part:
-                    cb = part[part.find("<cb_") :].strip()
-                    cb = cb.replace("<|sid_end|", "").replace("|", "").strip()
-                    if cb.startswith("<cb_") and cb.endswith(">"):
-                        cb_tokens.append(cb)
+        tokens.extend(extract_cb_tokens(sid_vocab_file))
     else:
         vocab_tokens = tokenizer.get_vocab().keys()
-        tokens = [t for t in vocab_tokens if "<cb_" in t]
+        tokens.extend([t for t in vocab_tokens if t.startswith("<cb_")])
 
-    # Add boundary markers if present in vocab
+    # Always include boundary markers (they should already be in the tokenizer)
     for marker in ("<|sid_begin|>", "<|sid_end|>", "<|item_begin|>", "<|item_end|>"):
-        if marker in tokenizer.get_vocab():
-            tokens.append(marker)
-
-    tokens.extend(cb_tokens)
+        tokens.append(marker)
 
     # de-dup while preserving order
     seen = set()
@@ -174,17 +169,14 @@ if __name__ == "__main__":
         print(f"Added {added} boundary tokens to tokenizer: {new_tokens}")
         model.resize_token_embeddings(len(tokenizer))
 
-    # Add bare cb_* tokens from sid vocab so collapsed item blocks tokenize as intended
-    import re
-    sid_vocab_file = Path("../sid_output/sid_vocab_used.txt")
+    # Add bare cb_* tokens from sid_vocab so collapsed item blocks tokenize as intended
+    sid_vocab_file = train_data_path.parent / "sid_output" / "sid_vocab_used.txt"
     cb_tokens: List[str] = []
     if sid_vocab_file.exists():
-        pat = re.compile("<cb_\\d+_\\d+>")
-        with sid_vocab_file.open("r", encoding="utf-8") as f:
-            for line in f:
-                cb_tokens.extend(pat.findall(line))
+        pat = re.compile(r"<cb_\d+_\d+>")
+        cb_tokens = pat.findall(sid_vocab_file.read_text(encoding="utf-8"))
     cb_tokens = list(dict.fromkeys(cb_tokens))
-    new_cb_tokens = [t for t in cb_tokens if tokenizer.convert_tokens_to_ids(t) == tokenizer.unk_token_id]
+    new_cb_tokens = [t for t in cb_tokens if tokenizer.convert_tokens_to_ids(t) is None or tokenizer.convert_tokens_to_ids(t) == tokenizer.unk_token_id]
     if new_cb_tokens:
         added = tokenizer.add_tokens(new_cb_tokens)
         print(f"Added {added} cb_* tokens to tokenizer from sid vocab: {len(new_cb_tokens)}")
@@ -202,9 +194,12 @@ if __name__ == "__main__":
     valid_special_token_ids = []
     valid_special_tokens = []
     for i, token_id in enumerate(tokenized_special_tokens):
-        if token_id != tokenizer.unk_token_id:
-            valid_special_token_ids.append(token_id)
-            valid_special_tokens.append(special_tokens[i])
+        if token_id is None:
+            continue
+        if tokenizer.unk_token_id is not None and token_id == tokenizer.unk_token_id:
+            continue
+        valid_special_token_ids.append(token_id)
+        valid_special_tokens.append(special_tokens[i])
     
     if len(valid_special_token_ids) == 0:
         raise ValueError("No valid SID tokens found in tokenizer. Ensure the SID-expanded tokenizer is used and sid_vocab_used.txt exists.")
