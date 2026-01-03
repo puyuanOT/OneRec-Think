@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import argparse
 
 import pandas as pd
 
@@ -31,35 +32,67 @@ def extract_sid_sequence(item_ids: list[str], user_id: str, beauty_items: dict) 
     return sid_sequence
 
 
-def build_dataset_entry(
+def make_description(prefix: list[str]) -> str:
+    return "The user has purchased the following items: " + "; ".join(prefix) + ";"
+
+
+def build_sliding_entries(
     user_id: str,
     sid_sequence: list[str],
-    tail_remove_count: int,
-) -> dict | None:
-    if len(sid_sequence) <= tail_remove_count + 1:
-        return None
+    min_prefix_len: int,
+    val_tail: int,
+    test_tail: int,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Create sliding-window prediction pairs.
+    Example (val_tail=2, test_tail=1):
+      sequence A B C D E F
+      pairs: AB->C, ABC->D, ABCD->E, ABCDE->F
+      train: AB->C, ABC->D
+      val:   ABCD->E
+      test:  ABCDE->F
+    """
+    train_rows: list[dict] = []
+    val_rows: list[dict] = []
+    test_rows: list[dict] = []
 
-    candidate_sequence = (
-        sid_sequence[: len(sid_sequence) - tail_remove_count]
-        if tail_remove_count > 0
-        else sid_sequence
-    )
+    # Collect all (prefix, target) pairs
+    pairs: list[tuple[list[str], str]] = []
+    for i in range(1, len(sid_sequence)):
+        prefix = sid_sequence[:i]
+        target = sid_sequence[i]
+        if len(prefix) < min_prefix_len:
+            continue
+        pairs.append((prefix, target))
 
-    if len(candidate_sequence) < 2:
-        return None
+    if not pairs:
+        return train_rows, val_rows, test_rows
 
-    groundtruth = candidate_sequence[-1]
-    description_sids = candidate_sequence[:-1]
+    # Determine split sizes
+    total = len(pairs)
+    t_tail = max(0, min(test_tail, total))
+    v_tail = max(0, min(val_tail, total - t_tail))
+    split_test = total - t_tail if t_tail > 0 else total
+    split_val = split_test - v_tail
 
-    if not description_sids:
-        return None
+    def to_rows(slice_pairs, bucket: list[dict]):
+        for prefix, target in slice_pairs:
+            bucket.append(
+                {
+                    "user_id": user_id,
+                    "description": make_description(prefix),
+                    "groundtruth": target,
+                }
+            )
 
-    description = "The user has purchased the following items: " + "; ".join(description_sids) + ";"
-    return {
-        "user_id": user_id,
-        "description": description,
-        "groundtruth": groundtruth,
-    }
+    # Train slice
+    to_rows(pairs[:split_val], train_rows)
+    # Val slice
+    to_rows(pairs[split_val:split_test], val_rows)
+    # Test slice
+    to_rows(pairs[split_test:], test_rows)
+
+    return train_rows, val_rows, test_rows
 
 
 def generate_sid_prediction_data(
@@ -68,6 +101,9 @@ def generate_sid_prediction_data(
     output_train: Path,
     output_val: Path,
     output_test: Path,
+    val_tail: int,
+    test_tail: int,
+    min_prefix_len: int,
 ) -> None:
     beauty_items = load_beauty_items(beauty_items_file)
 
@@ -96,17 +132,16 @@ def generate_sid_prediction_data(
         if len(sid_sequence) == 0:
             continue
 
-        entry_train = build_dataset_entry(user_id, sid_sequence, tail_remove_count=2)
-        if entry_train:
-            train_rows.append(entry_train)
-
-        entry_val = build_dataset_entry(user_id, sid_sequence, tail_remove_count=1)
-        if entry_val:
-            val_rows.append(entry_val)
-
-        entry_test = build_dataset_entry(user_id, sid_sequence, tail_remove_count=0)
-        if entry_test:
-            test_rows.append(entry_test)
+        tr, va, te = build_sliding_entries(
+            user_id=user_id,
+            sid_sequence=sid_sequence,
+            min_prefix_len=min_prefix_len,
+            val_tail=val_tail,
+            test_tail=test_tail,
+        )
+        train_rows.extend(tr)
+        val_rows.extend(va)
+        test_rows.extend(te)
 
         if (idx + 1) % 1000 == 0:
             print(f"Processed {idx + 1} lines...")
@@ -142,16 +177,39 @@ def generate_sid_prediction_data(
 
 
 if __name__ == "__main__":
-    sequential_file = Path("./sequential_data_processed.txt")
-    beauty_items_file = Path("./Beauty.pretrain.json")
-    output_train = Path("./training_prediction_sid_data_train.parquet")
-    output_val = Path("./training_prediction_sid_data_val.parquet")
-    output_test = Path("./training_prediction_sid_data_test.parquet")
+    parser = argparse.ArgumentParser(description="Generate SID prediction data with sliding windows.")
+    parser.add_argument("--sequential_file", type=Path, default=Path("./sequential_data_processed.txt"))
+    parser.add_argument("--beauty_items_file", type=Path, default=Path("./Beauty.pretrain.json"))
+    parser.add_argument("--output_train", type=Path, default=Path("./training_prediction_sid_data_train.parquet"))
+    parser.add_argument("--output_val", type=Path, default=Path("./training_prediction_sid_data_val.parquet"))
+    parser.add_argument("--output_test", type=Path, default=Path("./training_prediction_sid_data_test.parquet"))
+    parser.add_argument(
+        "--val_tail",
+        type=int,
+        default=2,
+        help="Number of final prediction steps to reserve for validation per user trajectory.",
+    )
+    parser.add_argument(
+        "--test_tail",
+        type=int,
+        default=1,
+        help="Number of final prediction steps to reserve for test per user trajectory.",
+    )
+    parser.add_argument(
+        "--min_prefix_len",
+        type=int,
+        default=2,
+        help="Minimum prefix length (number of items) required to form a training example.",
+    )
+    args = parser.parse_args()
 
     generate_sid_prediction_data(
-        sequential_file=sequential_file,
-        beauty_items_file=beauty_items_file,
-        output_train=output_train,
-        output_val=output_val,
-        output_test=output_test,
+        sequential_file=args.sequential_file,
+        beauty_items_file=args.beauty_items_file,
+        output_train=args.output_train,
+        output_val=args.output_val,
+        output_test=args.output_test,
+        val_tail=args.val_tail,
+        test_tail=args.test_tail,
+        min_prefix_len=args.min_prefix_len,
     )
