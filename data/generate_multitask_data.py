@@ -124,42 +124,53 @@ def combine_multitask_data(
         ratio1: float, ratio2: float, ratio3: float, ratio4: float,
         max_samples: int | None = None,
     ) -> pd.DataFrame:
-        """Sample from each dataframe according to ratios and combine."""
-        # Determine target sizes based on the smallest dataset
-        sizes = [len(df) for df in [df1, df2, df3, df4] if len(df) > 0]
-        if not sizes:
+        """Sample from each dataframe according to ratios and combine.
+
+        Uses a proportional scale so we are not capped by the smallest dataset.
+        We find the maximum total size allowed by all datasets given their
+        ratios: scale = min(len_i / ratio_i). Then sample n_i = scale * ratio_i,
+        clipped to the dataset size (and max_samples if provided).
+        """
+        dfs = [(df1, ratio1), (df2, ratio2), (df3, ratio3), (df4, ratio4)]
+
+        # Filter out empty or zero-ratio datasets
+        usable = [(len(df), r) for df, r in dfs if len(df) > 0 and r > 0]
+        if not usable:
             return pd.DataFrame()
-        
-        min_size = min(sizes)
+
+        # Compute the scaling factor permitted by all datasets
+        scale = min(length / ratio for length, ratio in usable)
         if max_samples:
-            min_size = min(min_size, max_samples)
-        
-        # Calculate sample sizes for each task
-        n1 = max(1, int(min_size * ratio1)) if len(df1) > 0 else 0
-        n2 = max(1, int(min_size * ratio2)) if len(df2) > 0 else 0
-        n3 = max(1, int(min_size * ratio3)) if len(df3) > 0 else 0
-        n4 = max(1, int(min_size * ratio4)) if len(df4) > 0 else 0
-        
-        # Sample from each dataframe
+            # Respect max_samples by limiting total scale
+            scale = min(scale, max_samples)
+
+        def compute_n(length: int, ratio: float) -> int:
+            if length == 0 or ratio == 0:
+                return 0
+            n = int(scale * ratio)
+            if n <= 0:
+                n = 1
+            return min(n, length)
+
+        n1 = compute_n(len(df1), ratio1)
+        n2 = compute_n(len(df2), ratio2)
+        n3 = compute_n(len(df3), ratio3)
+        n4 = compute_n(len(df4), ratio4)
+
         samples = []
         if n1 > 0 and len(df1) > 0:
-            n1 = min(n1, len(df1))
             samples.append(df1.sample(n=n1, random_state=42))
         if n2 > 0 and len(df2) > 0:
-            n2 = min(n2, len(df2))
             samples.append(df2.sample(n=n2, random_state=42))
         if n3 > 0 and len(df3) > 0:
-            n3 = min(n3, len(df3))
             samples.append(df3.sample(n=n3, random_state=42))
         if n4 > 0 and len(df4) > 0:
-            n4 = min(n4, len(df4))
             samples.append(df4.sample(n=n4, random_state=42))
-        
+
         if not samples:
             return pd.DataFrame()
-        
+
         combined = pd.concat(samples, ignore_index=True)
-        # Shuffle the combined dataset
         combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
         return combined
 
@@ -236,9 +247,9 @@ if __name__ == "__main__":
         output_val=data_dir / "training_multitask_data_val.parquet",
         output_test=data_dir / "training_multitask_data_test.parquet",
         # Sampling ratios
-        ratio_alignment=0.3,
-        ratio_sequential=0.3,
-        ratio_caption=0.2,
-        ratio_general=0.2,
+        ratio_alignment=0.2430,
+        ratio_sequential=0.6573,
+        ratio_caption=0.0494,
+        ratio_general=0.0503,
     )
 
