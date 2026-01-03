@@ -56,8 +56,11 @@ All commands below run from `data/`. A lightweight venv already exists at `.venv
    ```
 4. Sequential Preference Modeling:
    ```bash
-   python generate_sid_prediction_data.py
+   # sliding-window next-item prediction with tail splits
+   python generate_sid_prediction_data.py \
+     --val_tail 2 --test_tail 1 --min_prefix_len 2
    # outputs training_prediction_sid_data_{train,val,test}.parquet
+   # defaults: keep the last step for test, previous 2 for val, rest for train
    ```
 5. Itemic Dense Captioning (reconstruct summaries):
    ```bash
@@ -75,6 +78,9 @@ All commands below run from `data/`. A lightweight venv already exists at `.venv
    ```bash
    python generate_multitask_data.py
    # outputs training_multitask_data_{train,val,test}.parquet
+   # uses paper ratios (Alignment/Sequential/Caption/General):
+   # 24.30% / 65.73% / 4.94% / 5.03%
+   # proportional scaling (not capped by the smallest task)
    ```
 
 ### 3) Training pipelines (single GPU vs multi GPU)
@@ -168,6 +174,11 @@ Adjust `PER_DEVICE_BATCH`, `EPOCHS`, `WANDB_*` via env vars if needed.
 - Stage-2 data guardrails: `run_training_stage2.sh` will prompt you to generate general data (HF_TOKEN) and multitask parquet if missing.
 - Stage-1 data guardrails: `run_training_stage1.sh` checks for alignment parquet and points to `generate_training_data.py` if absent.
 - Evaluation scripts under `test/` remain the same; point them to the checkpoints produced in `train/results/`.
+
+Current multi-task dataset (paper ratios, sliding sequential data):
+- Train: 92,028 rows (sequential 60,490; alignment 22,363; general 4,629; caption 4,546).
+- Val: 24,493 rows (sequential 16,099; alignment 5,952; general 1,232; caption 1,210).
+- Test: 24,513 rows (sequential 16,113; alignment 5,956; general 1,233; caption 1,211).
 
 ### 5) Semantic ID (SID) construction pipeline
 - Requirements: `pip install -r data/requirements_sid.txt`
