@@ -16,7 +16,7 @@ DEEPSPEED_CMD=(
     --train_data_path "${TRAIN_DATA}"
     --val_data_path "${VAL_DATA}"
     --per_device_train_batch_size 2
-    --num_train_epochs 6
+    --num_train_epochs 2
     --gradient_checkpointing True
     --bf16 True
     --deepspeed ./scripts/ds_config_zero2.json
@@ -24,7 +24,7 @@ DEEPSPEED_CMD=(
     --logging_dir ./logs/beauty_multitask
     --logging_steps 10
     --eval_strategy epoch
-    --eval_on_start False
+    --eval_on_start True
     --save_strategy epoch
     --save_total_limit 10
     --metric_for_best_model eval_loss

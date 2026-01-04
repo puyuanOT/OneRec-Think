@@ -88,7 +88,7 @@ All scripts live under `train/`. Top-level `run_training_stage*.sh` now delegate
 
 - **Single GPU (recommended here)**
   - Stage 1 (warm-up, embeddings only): `bash train/single_gpu/stage1.sh`
-  - Stage 2 (multi-task, LoRA, bs=1, seq=4096): `bash train/single_gpu/stage2.sh`
+  - Stage 2 (multi-task, LoRA, bs=1, seq=4096, epochs=2, eval_on_start=True): `bash train/single_gpu/stage2.sh`
     - Auto-merges Stage-1 adapter into `basemodel/Qwen3-1.7B-stage1-merged`
   - Stage 3 (RA, LoRA, bs=1): `bash train/single_gpu/stage3.sh`
 

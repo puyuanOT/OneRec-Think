@@ -86,14 +86,14 @@ python ./scripts/train_multitask.py \
   --lora_target_modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
   --per_device_train_batch_size 1 \
   --per_device_eval_batch_size 1 \
-  --num_train_epochs 6 \
+  --num_train_epochs 2 \
   --gradient_checkpointing True \
   --bf16 True \
   --output_dir "${OUTPUT_DIR}" \
   --logging_dir "${LOGGING_DIR}" \
   --logging_steps 10 \
   --eval_strategy epoch \
-  --eval_on_start False \
+  --eval_on_start True \
   --save_strategy epoch \
   --save_total_limit 3 \
   --metric_for_best_model eval_loss \
