@@ -21,6 +21,10 @@ train/wandb/
 data/*.parquet
 data/sid_output/**
 data/Beauty.pretrain.before_minionerec.json
+# Explicitly ignore RA CoT parquets (already covered by data/*.parquet)
+data/training_RA_*.parquet
+# Keep RA chunked parts tracked
+# data/ra_parts/**  (uncomment to ignore parts if desired)
 
 # Keep raw and OAI-generated JSONs (but ignore the large combined summaries file)
 !data/Beauty.pretrain.json

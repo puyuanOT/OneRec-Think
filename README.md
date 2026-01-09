@@ -82,6 +82,24 @@ All commands below run from `data/`. A lightweight venv already exists at `.venv
    # 24.30% / 65.73% / 4.94% / 5.03%
    # proportional scaling (not capped by the smallest task)
    ```
+8. Reasoning Activation (CoT distillation for Stage 3):
+   ```bash
+   # requires OPENAI_API_KEY and langchain-openai installed
+   OPENAI_API_KEY=... python data/generate_ra_data.py \
+     --concurrency 20 \
+     --max_output_tokens 512
+   # outputs training_RA_{train,val}.parquet
+   ```
+   - Optional: split RA parquets into chunks for sharing/versioning, then merge later:
+     ```bash
+     # split into 2k-row parts under data/ra_parts/
+     python data/split_ra_parquet.py --chunk_size 2000 --output_dir data/ra_parts
+     # merge parts back
+     python data/split_ra_parquet.py --merge --parts_dir data/ra_parts \
+       --train_out data/training_RA_train.parquet \
+       --val_out data/training_RA_val.parquet
+     ```
+   - Note: `data/ra_parts/**` and `data/training_RA_*.parquet` are gitignored; keep parts locally or re-run generation as needed.
 
 ### 3) Training pipelines (single GPU vs multi GPU)
 All scripts live under `train/`. Top-level `run_training_stage*.sh` now delegate to `train/single_gpu/` by default; multi-GPU (DeepSpeed) scripts are under `train/multi_gpu/`.
@@ -91,6 +109,7 @@ All scripts live under `train/`. Top-level `run_training_stage*.sh` now delegate
   - Stage 2 (multi-task, LoRA, bs=1, seq=4096, epochs=2, eval_on_start=True): `bash train/single_gpu/stage2.sh`
     - Auto-merges Stage-1 adapter into `basemodel/Qwen3-1.7B-stage1-merged`
   - Stage 3 (RA, LoRA, bs=1): `bash train/single_gpu/stage3.sh`
+    - Expects `data/training_RA_{train,val}.parquet` (generate via `data/generate_ra_data.py`)
 
 - **Multi GPU (DeepSpeed, original)**
   - Stage 1: `bash train/multi_gpu/stage1.sh`

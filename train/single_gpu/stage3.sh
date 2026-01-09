@@ -13,6 +13,7 @@ LOGGING_DIR="${ROOT_DIR}/logs/RA_single"
 
 if [[ ! -f "${DATA_PATH}" || ! -f "${VAL_PATH}" ]]; then
   echo "Reasoning Activation data missing (training_RA_{train,val}.parquet)."
+  echo "Generate with: OPENAI_API_KEY=... python data/generate_ra_data.py --concurrency 20 --max_output_tokens 512"
   exit 1
 fi
 
