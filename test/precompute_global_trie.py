@@ -22,13 +22,13 @@ def extract_sid_from_text(text):
     return text.strip()
 
 
-def build_global_trie(test_parquet_file, model_path, output_file):
+def build_global_trie(test_parquet_file, model_path, output_file, fix_mistral_regex=True):
     print(f"Loading test data from: {test_parquet_file}")
     df = pd.read_parquet(test_parquet_file)
     print(f"Total samples in test set: {len(df)}")
 
     print(f"Loading tokenizer from: {model_path}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, fix_mistral_regex=fix_mistral_regex)
 
     print("Extracting all SIDs from test set (description + groundtruth)...")
     valid_sids = set()
@@ -108,6 +108,12 @@ if __name__ == "__main__":
     parser.add_argument("--test_parquet_file", type=str, required=True, help="Test parquet file")
     parser.add_argument("--model_path", type=str, required=True, help="Model path for tokenizer")
     parser.add_argument("--output_file", type=str, default="./global_trie.pkl", help="Output pickle file")
+    parser.add_argument("--no_fix_mistral_regex", action="store_true", help="Disable mistral regex fix")
     
     args = parser.parse_args()
-    build_global_trie(args.test_parquet_file, args.model_path, args.output_file)
+    build_global_trie(
+        args.test_parquet_file,
+        args.model_path,
+        args.output_file,
+        fix_mistral_regex=not args.no_fix_mistral_regex,
+    )

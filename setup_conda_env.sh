@@ -15,18 +15,18 @@ echo "========================================"
 
 if command -v conda >/dev/null 2>&1; then
     echo "[info] conda detected, using conda environment '${ENV_NAME}'"
-    if conda env list | grep -q "^${ENV_NAME} "; then
-        echo "Removing existing environment: ${ENV_NAME}"
-        conda env remove -n ${ENV_NAME} -y
-    fi
+if conda env list | grep -q "^${ENV_NAME} "; then
+    echo "Removing existing environment: ${ENV_NAME}"
+    conda env remove -n ${ENV_NAME} -y
+fi
 
-    echo "Creating new conda environment with Python ${PYTHON_VERSION}..."
-    conda create -n ${ENV_NAME} python=${PYTHON_VERSION} -y
+echo "Creating new conda environment with Python ${PYTHON_VERSION}..."
+conda create -n ${ENV_NAME} python=${PYTHON_VERSION} -y
 
-    echo "Activating environment..."
+echo "Activating environment..."
     # shellcheck disable=SC1091
     source "$(conda info --base)/etc/profile.d/conda.sh"
-    conda activate ${ENV_NAME}
+conda activate ${ENV_NAME}
 else
     echo "[warn] conda not found; falling back to python venv at ${VENV_PATH}"
     python3 -m venv "${VENV_PATH}"

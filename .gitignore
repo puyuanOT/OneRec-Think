@@ -37,3 +37,4 @@ data/user_summaries.json
 # Misc
 .DS_Store
 
+data_backup/

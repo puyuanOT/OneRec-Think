@@ -79,10 +79,10 @@ def build_sliding_entries(
         for prefix, target in slice_pairs:
             bucket.append(
                 {
-                    "user_id": user_id,
+        "user_id": user_id,
                     "description": make_description(prefix),
                     "groundtruth": target,
-                }
+    }
             )
 
     # Train slice

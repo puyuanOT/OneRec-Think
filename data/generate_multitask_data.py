@@ -137,13 +137,13 @@ def combine_multitask_data(
         usable = [(len(df), r) for df, r in dfs if len(df) > 0 and r > 0]
         if not usable:
             return pd.DataFrame()
-
+        
         # Compute the scaling factor permitted by all datasets
         scale = min(length / ratio for length, ratio in usable)
         if max_samples:
             # Respect max_samples by limiting total scale
             scale = min(scale, max_samples)
-
+        
         def compute_n(length: int, ratio: float) -> int:
             if length == 0 or ratio == 0:
                 return 0
@@ -166,10 +166,10 @@ def combine_multitask_data(
             samples.append(df3.sample(n=n3, random_state=42))
         if n4 > 0 and len(df4) > 0:
             samples.append(df4.sample(n=n4, random_state=42))
-
+        
         if not samples:
             return pd.DataFrame()
-
+        
         combined = pd.concat(samples, ignore_index=True)
         combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
         return combined

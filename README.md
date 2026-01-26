@@ -6,275 +6,599 @@ To bridge this gap, we propose **OneRec-Think**, a unified framework that seamle
 
 ![OneRec-Think pipeline](png/OneRec-Think.png)
 
-The framework consists of three components:
-1.  **Itemic Alignment**, which projects itemic tokens into the LLM's textual space to establish semantic grounding.
-2.  **Reasoning Activation**, which constructs simple yet useful chain-of-thought (CoT) fine-tuning examples to stimulate reasoning capabilities within the recommendation context.
-3.  **Reasoning Enhancement**, where we design a recommendation-specific reward function that accounts for the multi-validity nature of user preferences.
+The framework consists of four training stages:
+1. **Stage 1: Itemic Alignment** - Projects itemic tokens into the LLM's textual space to establish semantic grounding.
+2. **Stage 2: Multi-task Learning** - Integrates sequential prediction with caption generation and general language modeling.
+3. **Stage 3: Reasoning Activation** - Constructs chain-of-thought (CoT) fine-tuning examples to stimulate reasoning capabilities.
+4. **Stage 4: Reasoning Enhancement** - Uses GRPO with Rollout-Beam reward to enhance reasoning quality via reinforcement learning.
 
 We validate our model's effectiveness on multiple public datasets, with its deployment on an industrial-scale short-video platform yielding a further online gain of **0.159% in APP Stay Time**. Additionally, we conduct extensive case studies that provide qualitative evidence for the role of reasoning in recommendation.
 
+---
+
+## Table of Contents
+
+1. [Quick Start: Full Replication from Git](#quick-start-full-replication-from-git)
+2. [Getting Started](#getting-started)
+3. [Data Preparation](#data-preparation)
+4. [Training Pipeline](#training-pipeline)
+   - [Stage 1: Itemic Alignment](#stage-1-itemic-alignment)
+   - [Stage 2: Multi-task Learning](#stage-2-multi-task-learning)
+   - [Stage 3: Reasoning Activation](#stage-3-reasoning-activation)
+   - [Stage 4: Reasoning Enhancement](#stage-4-reasoning-enhancement)
+5. [Model Outputs](#model-outputs)
+6. [Evaluation](#evaluation)
+7. [Hyperparameters](#hyperparameters)
+8. [Additional Notes](#additional-notes)
+
+---
+
+## Quick Start: Full Replication from Git
+
+This section provides a complete, automated pipeline to replicate the entire training process using **only files tracked in Git**. No external API calls or pre-computed data required (except for the base model download from HuggingFace).
+
+### Prerequisites
+
+- **GPU**: NVIDIA GPU with ≥40GB VRAM (A100 or H100 recommended)
+- **HuggingFace Token**: For downloading Qwen3-1.7B base model
+- **Wandb API Key** (optional): For training monitoring
+
+### Step 1: Environment Setup
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd OneRec-Think
+
+# Create virtual environment and install dependencies
+bash setup_conda_env.sh
+source .venv/bin/activate
+```
+
+### Step 2: Prepare Data from Git-tracked Chunks
+
+All training data can be reconstructed from the small data chunks tracked in Git:
+
+```bash
+# Combine JSON chunks into full files
+python data/combine_json_dict.py \
+  data/Beauty.pretrain.with_summaries.part*.json \
+  --output data/Beauty.pretrain.with_summaries.json
+
+python data/combine_json_dict.py \
+  data/user_summaries.part*.json \
+  --output data/user_summaries.json
+
+# Combine RA parquet chunks
+python -c "
+import pandas as pd
+import glob
+
+# Combine training RA data
+train_files = sorted(glob.glob('data/ra_parts/training_RA_train_part*.parquet'))
+train_df = pd.concat([pd.read_parquet(f) for f in train_files], ignore_index=True)
+train_df.to_parquet('data/training_RA_train.parquet')
+print(f'Created training_RA_train.parquet with {len(train_df)} samples')
+
+# Combine validation RA data
+val_files = sorted(glob.glob('data/ra_parts/training_RA_val_part*.parquet'))
+val_df = pd.concat([pd.read_parquet(f) for f in val_files], ignore_index=True)
+val_df.to_parquet('data/training_RA_val.parquet')
+print(f'Created training_RA_val.parquet with {len(val_df)} samples')
+"
+```
+
+### Step 3: Generate All Training Data
+
+```bash
+cd data
+
+# Generate SID vocabulary and mappings
+pip install -r requirements_sid.txt
+python generate_sid_with_minionerec.py
+
+# Generate training datasets
+python generate_training_data.py                    # Alignment data
+python generate_sid_prediction_data.py              # Sequential prediction
+python generate_caption_data.py                     # Caption data
+python generate_multitask_data.py                   # Combined multi-task
+
+# Download general corpus (requires HF token)
+pip install -r requirements_general.txt
+HF_TOKEN=your_token python download_general_corpus.py
+
+cd ..
+```
+
+### Step 4: Prepare Base Model
+
+```bash
+# Download and expand vocabulary with SID tokens
+HF_TOKEN=your_token bash scripts/prepare_basemodel.sh
+```
+
+### Step 5: Run Full Training Pipeline
+
+```bash
+# Set up Wandb (optional but recommended)
+export WANDB_API_KEY=your_wandb_key
+export WANDB_PROJECT=onerec-think
+
+# Stage 1: Itemic Alignment (~2 hours)
+bash train/single_gpu/stage1.sh
+
+# Stage 2: Multi-task Learning (~8 hours)
+bash train/single_gpu/stage2.sh
+
+# Stage 3: Reasoning Activation (~2 hours)
+bash train/single_gpu/stage3.sh
+
+# Stage 4: Reasoning Enhancement (~75 hours with early stopping)
+bash train/single_gpu/stage4.sh
+```
+
+### Step 6: Evaluate
+
+```bash
+# Evaluate Stage 4 model with Chain-of-Thought
+python test/test_model_hitrate.py \
+  --merged_model_path basemodel/Qwen3-1.7B-stage4-merged \
+  --test_parquet_file data/training_prediction_sid_data_test.parquet \
+  --eval_mode reasoning \
+  --num_beams 10 \
+  --test_batch_size 8 \
+  --enable_cot
+```
+
+### One-Liner Full Pipeline
+
+For automated end-to-end training (assumes environment is set up):
+
+```bash
+export HF_TOKEN=your_hf_token
+export WANDB_API_KEY=your_wandb_key
+
+# Prepare data and model
+python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json && \
+python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json && \
+python -c "import pandas as pd; import glob; pd.concat([pd.read_parquet(f) for f in sorted(glob.glob('data/ra_parts/training_RA_train_part*.parquet'))]).to_parquet('data/training_RA_train.parquet'); pd.concat([pd.read_parquet(f) for f in sorted(glob.glob('data/ra_parts/training_RA_val_part*.parquet'))]).to_parquet('data/training_RA_val.parquet')" && \
+bash scripts/prepare_basemodel.sh && \
+
+# Run training pipeline
+bash train/single_gpu/stage1.sh && \
+bash train/single_gpu/stage2.sh && \
+bash train/single_gpu/stage3.sh && \
+bash train/single_gpu/stage4.sh
+```
+
+### Git-Tracked Data Files Summary
+
+| File Pattern | Description | Size |
+|--------------|-------------|------|
+| `data/Beauty.pretrain.with_summaries.part*.json` | Item summaries (4 parts) | ~40MB total |
+| `data/user_summaries.part*.json` | User summaries (6 parts) | ~30MB total |
+| `data/ra_parts/training_RA_*.parquet` | CoT training data (10 parts) | ~18MB total |
+| `data/sequential_data_processed.txt` | User-item interaction sequences | ~2MB |
+| `data/Beauty.pretrain.json` | Raw item metadata | ~5MB |
+
+---
 
 ## Getting Started
+
+### Environment Setup
 
 Run the environment setup script before proceeding:
 ```bash
 bash setup_conda_env.sh
 ```
 
-### 1) Obtain and expand the base model
-- Recommended one-liner (downloads + expands vocab with cb_* SIDs):
-  ```bash
-  HF_TOKEN=... bash scripts/prepare_basemodel.sh
-  ```
-  - Downloads `basemodel/Qwen3-1.7B/` if missing.
-  - Expands to `basemodel/Qwen3-1.7B-sid/` using `sid_output/sid_vocab_used.txt`.
-- Manual (if you prefer the individual steps):
-  ```bash
-  cd basemodel
-  HF_TOKEN=... python download_basemodel.py          # -> basemodel/Qwen3-1.7B/
-  python expand_vocab.py                             # -> basemodel/Qwen3-1.7B-sid/
-  ```
+This creates a Python virtual environment with all required dependencies.
 
-### 2) Prepare data (four tasks + supporting summaries)
-All commands below run from `data/`. A lightweight venv already exists at `.venv_summaries`; activate it if desired.
+### Obtain and Expand the Base Model
 
-1. Item summaries (AI-generated, GPT-4.1-mini):
-   ```bash
-   OAI_API_KEY=... python generate_item_summaries.py
-   # writes Beauty.pretrain.with_summaries.json
-   ```
-2. User summaries for warm-up (uses item summaries + interaction sequences):
-   ```bash
-   OAI_API_KEY=... python generate_user_summaries.py
-   # writes user_summaries.json
-   ```
-3. Interleaved User Persona Grounding (warm-up data):
-   ```bash
-   python generate_training_data.py
-   # uses sequential_data_processed.txt + user_summaries.json
-   # outputs training_align_data_{train,val,test}.parquet
-   ```
-4. Sequential Preference Modeling:
-   ```bash
-   # sliding-window next-item prediction with tail splits
-   python generate_sid_prediction_data.py \
-     --val_tail 2 --test_tail 1 --min_prefix_len 2
-   # outputs training_prediction_sid_data_{train,val,test}.parquet
-   # defaults: keep the last step for test, previous 2 for val, rest for train
-   ```
-5. Itemic Dense Captioning (reconstruct summaries):
-   ```bash
-   python generate_caption_data.py
-   # uses Beauty.pretrain.with_summaries.json
-   # outputs training_caption_data_{train,val,test}.parquet
-   ```
-6. General Language Modeling (from HF; requires HF_TOKEN):
-   ```bash
-   pip install -r requirements_general.txt
-   HF_TOKEN=... python download_general_corpus.py
-   # outputs general_corpus_{train,val,test}.parquet
-   ```
-7. Combine 4 tasks for multi-task integration:
-   ```bash
-   python generate_multitask_data.py
-   # outputs training_multitask_data_{train,val,test}.parquet
-   # uses paper ratios (Alignment/Sequential/Caption/General):
-   # 24.30% / 65.73% / 4.94% / 5.03%
-   # proportional scaling (not capped by the smallest task)
-   ```
-8. Reasoning Activation (CoT distillation for Stage 3):
-   ```bash
-   # requires OPENAI_API_KEY and langchain-openai installed
-   OPENAI_API_KEY=... python data/generate_ra_data.py \
-     --concurrency 20 \
-     --max_output_tokens 512
-   # outputs training_RA_{train,val}.parquet
-   ```
-   - Optional: split RA parquets into chunks for sharing/versioning, then merge later:
-     ```bash
-     # split into 2k-row parts under data/ra_parts/
-     python data/split_ra_parquet.py --chunk_size 2000 --output_dir data/ra_parts
-     # merge parts back
-     python data/split_ra_parquet.py --merge --parts_dir data/ra_parts \
-       --train_out data/training_RA_train.parquet \
-       --val_out data/training_RA_val.parquet
-     ```
-   - Note: `data/ra_parts/**` and `data/training_RA_*.parquet` are gitignored; keep parts locally or re-run generation as needed.
-
-### 3) Training pipelines (single GPU vs multi GPU)
-All scripts live under `train/`. Top-level `run_training_stage*.sh` now delegate to `train/single_gpu/` by default; multi-GPU (DeepSpeed) scripts are under `train/multi_gpu/`.
-
-- **Single GPU (recommended here)**
-  - Stage 1 (warm-up, embeddings only): `bash train/single_gpu/stage1.sh`
-  - Stage 2 (multi-task, LoRA, bs=1, seq=4096, epochs=2, eval_on_start=True): `bash train/single_gpu/stage2.sh`
-    - Auto-merges Stage-1 adapter into `basemodel/Qwen3-1.7B-stage1-merged`
-  - Stage 3 (RA, LoRA, bs=1): `bash train/single_gpu/stage3.sh`
-    - Expects `data/training_RA_{train,val}.parquet` (generate via `data/generate_ra_data.py`)
-
-- **Multi GPU (DeepSpeed, original)**
-  - Stage 1: `bash train/multi_gpu/stage1.sh`
-  - Stage 2: `bash train/multi_gpu/stage2.sh`
-  - Stage 3: `bash train/multi_gpu/stage3.sh`
-
-Notes:
-- Default W&B naming auto-stamps time-of-day; override `WANDB_NAME` if desired.
-- For Stage 2/3 single GPU we keep seq length 4096; batch sizes are set to 1 to fit.
-
-### 3b) Reproducible setup & data/SID build (no re-summarization)
-Use these commands to recreate the environment, combine shipped summaries, generate SIDs (MiniOneRec-style with OpenAI `text-embedding-3-small`), and build all training parquet files. This path skips new OpenAI calls for item/user summarization because the shards are already provided.
+**Recommended one-liner** (downloads + expands vocab with SID tokens):
 ```bash
-cd /home/ubuntu/OneRec-Think
+HF_TOKEN=... bash scripts/prepare_basemodel.sh
+```
+- Downloads `basemodel/Qwen3-1.7B/` if missing.
+- Expands to `basemodel/Qwen3-1.7B-sid/` using `sid_output/sid_vocab_used.txt`.
 
-# 0) Secrets (do NOT commit)
-export OAI_API_KEY="..." HF_TOKEN="..."
+**Manual steps** (if you prefer individual steps):
+```bash
+cd basemodel
+HF_TOKEN=... python download_basemodel.py          # -> basemodel/Qwen3-1.7B/
+python expand_vocab.py                             # -> basemodel/Qwen3-1.7B-sid/
+```
 
-# 1) Environment (conda optional; script falls back to .venv if conda is absent)
-bash setup_conda_env.sh
-source .venv/bin/activate  # only needed when conda is not present
+---
 
-# 2) Combine shipped summary shards
+## Data Preparation
+
+All data generation commands run from the `data/` directory.
+
+### 1. Item Summaries (AI-generated, GPT-4.1-mini)
+```bash
+OAI_API_KEY=... python generate_item_summaries.py
+# writes Beauty.pretrain.with_summaries.json
+```
+
+### 2. User Summaries for Warm-up
+```bash
+OAI_API_KEY=... python generate_user_summaries.py
+# writes user_summaries.json
+```
+
+### 3. Interleaved User Persona Grounding (Alignment Data)
+```bash
+python generate_training_data.py
+# outputs training_align_data_{train,val,test}.parquet
+```
+
+### 4. Sequential Preference Modeling
+```bash
+python generate_sid_prediction_data.py --val_tail 2 --test_tail 1 --min_prefix_len 2
+# outputs training_prediction_sid_data_{train,val,test}.parquet
+```
+
+### 5. Itemic Dense Captioning
+```bash
+python generate_caption_data.py
+# outputs training_caption_data_{train,val,test}.parquet
+```
+
+### 6. General Language Modeling (from HuggingFace)
+```bash
+pip install -r requirements_general.txt
+HF_TOKEN=... python download_general_corpus.py
+# outputs general_corpus_{train,val,test}.parquet
+```
+
+### 7. Multi-task Combined Data
+```bash
+python generate_multitask_data.py
+# outputs training_multitask_data_{train,val,test}.parquet
+# Paper ratios: Alignment 24.30% / Sequential 65.73% / Caption 4.94% / General 5.03%
+```
+
+### 8. Reasoning Activation Data (CoT Distillation for Stage 3)
+```bash
+OPENAI_API_KEY=... python data/generate_ra_data.py --concurrency 20 --max_output_tokens 512
+# outputs training_RA_{train,val}.parquet
+```
+
+### Fast Path (When Summaries Already Exist)
+
+If you have pre-computed summaries, combine the shards:
+```bash
 python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json
 python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json
-
-# 3) Build SIDs (embeds summaries with text-embedding-3-small, then Faiss KMeans)
-cd scripts/pipeline
-OAI_API_KEY=$OAI_API_KEY HF_TOKEN=$HF_TOKEN bash build_sids.sh \
-  --input_json ../data/Beauty.pretrain.with_summaries.json \
-  --output_dir ../data/sid_output \
-  --output_model_dir ../basemodel/Qwen3-1.7B-sid
-# If you see imbalance warnings, reduce clusters per codebook, e.g., --k_clusters 256.
-
-# 4) Merge sid_list into Beauty.pretrain.json and add a space-joined sid string (backup kept)
-cd ..
-python - <<'PY'
-import json, shutil, pathlib
-root = pathlib.Path('.')
-base = root / 'data' / 'Beauty.pretrain.json'
-sids = root / 'data' / 'sid_output' / 'items_with_sid.json'
-backup = root / 'data' / 'Beauty.pretrain.before_minionerec.json'
-if not backup.exists():
-    shutil.copy2(base, backup)
-with base.open('r', encoding='utf-8') as f:
-    items = json.load(f)
-with sids.open('r', encoding='utf-8') as f:
-    sid_items = json.load(f)
-for k, v in items.items():
-    sid_list = sid_items.get(k, {}).get('sid_list')
-    if not sid_list:
-        continue
-    v['sid_list'] = sid_list
-    v['sid'] = ' '.join(sid_list)
-with base.open('w', encoding='utf-8') as f:
-    json.dump(items, f, ensure_ascii=False)
-print("Merged sid_list/sid into Beauty.pretrain.json; backup at", backup)
-PY
-
-# 5) Build all training datasets (skips summarization because combined files exist)
-cd scripts/pipeline
-OAI_API_KEY=$OAI_API_KEY HF_TOKEN=$HF_TOKEN bash build_training_data.sh
-cd ..
 ```
 
-### 3c) Stage-1 training (token warm-up) — minimal, no DeepSpeed
-Uses HF Trainer + PEFT TrainableTokens; logs to W&B.
+---
+
+## Training Pipeline
+
+The training pipeline consists of **four sequential stages**, each building upon the previous one. Models are automatically saved to the `basemodel/` folder after each stage for easy chaining.
+
+### Overview
+
+| Stage | Name | Input Model | Output Model | Data |
+|-------|------|-------------|--------------|------|
+| 1 | Itemic Alignment | `Qwen3-1.7B-sid` | `Qwen3-1.7B-stage1-merged` | Alignment data |
+| 2 | Multi-task Learning | `Qwen3-1.7B-stage1-merged` | `Qwen3-1.7B-stage2-merged` | Multi-task combined |
+| 3 | Reasoning Activation | `Qwen3-1.7B-stage2-merged` | `Qwen3-1.7B-stage3-merged` | RA (CoT) data |
+| 4 | Reasoning Enhancement | `Qwen3-1.7B-stage3-merged` | `Qwen3-1.7B-stage4-merged` | RA data + RL |
+
+### Stage 1: Itemic Alignment
+
+**Purpose**: Warm up the model on new SID tokens by training embeddings only.
+
 ```bash
-cd /home/ubuntu/OneRec-Think
-source .venv/bin/activate  # or conda activate onerec-think
-export OAI_API_KEY="..." HF_TOKEN="..." \
-  WANDB_API_KEY="..." WANDB_PROJECT="onerec-think" \
-  WANDB_RUN_GROUP="stage1" WANDB_NAME="stage1-align" WANDB_MODE="online" \
-  TRANSFORMERS_NO_DEEPSPEED=1
-bash train/single_gpu/stage1.sh  # defaults: model=basemodel/Qwen3-1.7B-sid, bs=2, epochs=6, eval_on_start=True
-tail -f train/beauty_align.log
+bash train/single_gpu/stage1.sh
 ```
-Adjust `PER_DEVICE_BATCH`, `EPOCHS`, `WANDB_*` via env vars if needed.
 
-### 4) Notes and evaluation
-- Stage-2 data guardrails: `run_training_stage2.sh` will prompt you to generate general data (HF_TOKEN) and multitask parquet if missing.
-- Stage-1 data guardrails: `run_training_stage1.sh` checks for alignment parquet and points to `generate_training_data.py` if absent.
-- Evaluation scripts under `test/` remain the same; point them to the checkpoints produced in `train/results/`.
+**Key parameters**:
+- Epochs: 6
+- Batch size: 2
+- Learning rate: 1e-4
+- Trains only embedding layer (new tokens)
 
-Current multi-task dataset (paper ratios, sliding sequential data):
-- Train: 92,028 rows (sequential 60,490; alignment 22,363; general 4,629; caption 4,546).
-- Val: 24,493 rows (sequential 16,099; alignment 5,952; general 1,232; caption 1,210).
-- Test: 24,513 rows (sequential 16,113; alignment 5,956; general 1,233; caption 1,211).
+**Output**: `basemodel/Qwen3-1.7B-stage1-merged/`
 
-### 5) Semantic ID (SID) construction pipeline
-- Requirements: `pip install -r data/requirements_sid.txt`
-- Configurable bash: `scripts/pipeline/build_sids.sh`
-  - Defaults: k_clusters=1024, num_codebooks=3, model=Qwen/Qwen3-1.7B, output model dir `basemodel/Qwen3-1.7B-sid/`.
-  - Edit the CONFIG block at the top of the script for easy changes, or override via CLI flags.
-- Run:
-  ```bash
-  cd scripts/pipeline
-  OAI_API_KEY=... HF_TOKEN=... bash build_sids.sh
-  ```
-- Outputs:
-  - `data/sid_output/embeddings.npy`, `cluster_labels_cb*.npy`
-  - `data/sid_output/item_sid_mapping.json`, `items_with_sid.json` (adds `sid_list`)
-  - `data/sid_output/sid_vocab_used.txt`
-  - Expanded model/tokenizer with new SID tokens: `basemodel/Qwen3-1.7B-sid/` (default path)
+### Stage 2: Multi-task Learning
 
-SID token format:
-- One token per codebook: `<|sid_begin|><cb_{codebook_idx}_{cluster_id}><|sid_end|>`
-- Tokens are auto-added to the tokenizer and the model embedding matrix is resized by the script.
+**Purpose**: Train on multiple tasks (sequential prediction, caption, alignment, general) with LoRA.
 
-### 6) Data build pipeline notes
-- Script: `scripts/pipeline/build_training_data.sh`
-- By default it assumes item/user summaries already exist and skips regenerating them if:
-  - `data/Beauty.pretrain.with_summaries.json` exists (skip unless `FORCE_REGEN_ITEM_SUMMARIES=1`)
-  - `data/user_summaries.json` exists (skip unless `FORCE_REGEN_USER_SUMMARIES=1`)
-- Otherwise it generates:
-  1) Item summaries (OpenAI)
-  2) User summaries (OpenAI)
-  3) Alignment data
-  4) Sequential prediction data
-  5) Item captioning data
-  6) General corpus (HF)
-  7) Multi-task combined data
+```bash
+bash train/single_gpu/stage2.sh
+```
 
-### 6b) Fast path when summaries already exist
-- Combine the shipped shards (keeps you from calling OpenAI again):
-  ```bash
-  python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json
-  python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json
-  ```
-- Build SIDs with the MiniOneRec-style script (requires OpenAI embeddings and Faiss; install deps via `pip install -r data/requirements_sid.txt`):
-  ```bash
-  cd scripts/pipeline
-  OAI_API_KEY=... bash build_sids.sh \
-    --input_json ../data/Beauty.pretrain.with_summaries.json \
-    --output_dir ../data/sid_output \
-    --output_model_dir ../basemodel/Qwen3-1.7B-sid
-  ```
-  This first runs OpenAI `text-embedding-3-small` over every `ai_summary` to produce `embeddings.npy`, then clusters them to get SIDs. Outputs land in `data/sid_output/` (embeddings, cluster labels, `items_with_sid.json`, `sid_vocab_used.txt`) and the expanded model/tokenizer in `basemodel/Qwen3-1.7B-sid/`.
-- Build the training parquet with your existing summaries (generation steps are skipped if the combined files above exist):
-  ```bash
-  cd scripts/pipeline
-  OAI_API_KEY=... HF_TOKEN=... bash build_training_data.sh
-  ```
-  This produces `training_*` parquet files in `data/`. If you recompute SIDs and want downstream scripts to use them, merge `data/sid_output/items_with_sid.json` into your working `Beauty.pretrain.json` and, if needed, add a `sid` string per item (e.g., space-join `sid_list`, or use the single entry when `num_codebooks=1`) for scripts that expect a `sid` field.
+**Key parameters**:
+- Epochs: 6
+- Batch size: 1 (memory-constrained)
+- Max sequence length: 4096
+- LoRA: r=64, alpha=128
+- Learning rate: 2e-5
 
-### 7) Handling large JSONs (repo tracks shards, not full files)
-- Item summaries are stored as shards under 100MB each:
-  - `data/Beauty.pretrain.with_summaries.part01.json` … `part04.json`
-  - Recombine when needed:
-    ```bash
-    python data/combine_json_dict.py data/Beauty.pretrain.with_summaries.part*.json --output data/Beauty.pretrain.with_summaries.json
-    ```
-- User summaries are also sharded:
-  - `data/user_summaries.part01.json` … `part06.json`
-  - Recombine:
-    ```bash
-    python data/combine_json_dict.py data/user_summaries.part*.json --output data/user_summaries.json
-    ```
-- To re-split a combined file (if regenerated locally):
-  ```bash
-  python data/split_json_dict.py --input data/Beauty.pretrain.with_summaries.json --output_dir data --prefix Beauty.pretrain.with_summaries.part --max_items_per_file 4000
-  python data/split_json_dict.py --input data/user_summaries.json --output_dir data --prefix user_summaries.part --max_items_per_file 4000
-  ```
+**Output**: `basemodel/Qwen3-1.7B-stage2-merged/`
 
-### 8) GH200 (ARM64 + H100) setup notes
-- Install a CUDA-enabled aarch64 PyTorch build (CUDA ≥ 12.2 / SM90). Follow PyTorch’s official selector for ARM + CUDA; verify with `python - <<'PY'\nimport torch; print(torch.cuda.is_available(), torch.version.cuda)\nPY`.
-- For SID pipeline, prefer GPU Faiss on GH200: `pip install faiss-gpu` (or build Faiss with CUDA for aarch64). The requirements file now lists `faiss-gpu`; if a wheel is unavailable for your platform, build from source.
-- Ensure CUDA libs/drivers are visible to Python (e.g., `LD_LIBRARY_PATH`/`PATH`), and run the training scripts after activating the environment with the CUDA-enabled torch/Faiss.
+**Note**: The script automatically merges the LoRA adapter with the base model after training.
+
+### Stage 3: Reasoning Activation
+
+**Purpose**: Fine-tune on Chain-of-Thought (CoT) recommendation examples to activate reasoning.
+
+```bash
+bash train/single_gpu/stage3.sh
+```
+
+**Key parameters**:
+- Epochs: 6
+- Batch size: 16
+- LoRA: r=64, alpha=128
+- Learning rate: 2e-5
+- Data: `training_RA_{train,val}.parquet`
+
+**Output**: `basemodel/Qwen3-1.7B-stage3-merged/`
+
+**Model behavior**: After this stage, the model generates:
+```
+<think>
+The user is likely to buy items in Beauty > Hair Care > Styling Products category
+</think>
+<|item_begin|><s_a_X><s_b_X><s_c_X><s_d_X><|item_end|>
+```
+
+### Stage 4: Reasoning Enhancement
+
+**Purpose**: Enhance reasoning quality using Reinforcement Learning with GRPO (Group Relative Policy Optimization) and Rollout-Beam reward.
+
+```bash
+bash train/single_gpu/stage4.sh
+```
+
+**Key parameters (from paper)**:
+- Epochs: 6 (with early stopping)
+- Batch size: 16
+- |G| = 16 (number of CoT paths sampled per prompt)
+- K = 32 (beam search width for reward computation)
+- Learning rate: 1e-5
+- β = 0.001 (KL divergence coefficient)
+- ε = 0.2 (clip ratio)
+- Temperature: 1.0
+- Max new tokens: 512
+
+**Output**: `basemodel/Qwen3-1.7B-stage4-merged/`
+
+**Reward function**: Hierarchical match reward with partial credit:
+- Full match (all 4 SID components): 1.0
+- Partial match: 0.125 per matching level
+
+**Early Stopping**: The training script includes early stopping based on eval reward plateau:
+- Minimum steps before stopping: 30,000
+- Patience: 2 evaluations without improvement
+- Minimum improvement threshold: 0.001
+
+Based on training analysis, the optimal checkpoint is typically around **40-50k steps** (~4-5 epochs). Training beyond this may lead to slight over-optimization.
+
+**Using Earlier Checkpoints**: If you want to use an earlier checkpoint:
+```bash
+# Merge a specific checkpoint
+python basemodel/merge_model.py \
+  --base_model_path basemodel/Qwen3-1.7B-stage3-merged \
+  --lora_adapter_path train/results/RL_single/checkpoint-50000 \
+  --output_path basemodel/Qwen3-1.7B-stage4-50k-merged
+```
+
+**Monitoring**: Training logs to Weights & Biases. Check progress:
+```bash
+tail -f logs/stage4_training.log
+```
+
+**Training Metrics to Watch**:
+- `eval/rewards/reward_fn/mean`: Should rise early, plateau around 40-50k steps
+- `train/entropy`: Should decrease as policy becomes more confident
+- `eval_reward_std`: Should remain stable (no reward collapse)
+
+---
+
+## Model Outputs
+
+After training, models are saved in the `basemodel/` directory:
+
+```
+basemodel/
+├── Qwen3-1.7B/                    # Original base model
+├── Qwen3-1.7B-sid/                # Base model with SID vocabulary
+├── Qwen3-1.7B-stage1-merged/      # After Stage 1 (alignment)
+├── Qwen3-1.7B-stage2-merged/      # After Stage 2 (multi-task)
+├── Qwen3-1.7B-stage3-merged/      # After Stage 3 (reasoning activation)
+└── Qwen3-1.7B-stage4-merged/      # After Stage 4 (reasoning enhancement)
+```
+
+Intermediate LoRA checkpoints are saved in `train/results/`:
+- `train/results/beauty_align_single/` - Stage 1
+- `train/results/beauty_multitask_single/` - Stage 2
+- `train/results/RA_single/` - Stage 3
+- `train/results/RL_single/` - Stage 4
+
+---
+
+## Evaluation
+
+### Expected Results
+
+Results on the full Beauty test set (22,363 samples) with CoT reasoning enabled:
+
+| Model | hit@1 | hit@5 | hit@10 | ndcg@5 | ndcg@10 |
+|-------|-------|-------|--------|--------|---------|
+| Stage 3 (Reasoning Activation) | 0.0056 | 0.0181 | 0.0263 | 0.0129 | 0.0167 |
+| Stage 4 (50k checkpoint) | 0.0058 | 0.0178 | 0.0257 | 0.0133 | 0.0172 |
+| Stage 4 (60k, final) | 0.0050 | 0.0140 | 0.0220 | 0.0117 | 0.0159 |
+
+**Key Observations**:
+- Stage 4 (50k checkpoint) shows best hit@1 (+3.6% over Stage 3)
+- Stage 4 training beyond 50k steps shows over-optimization (lower metrics)
+- Use early stopping or the 50k checkpoint for best results
+
+### Hit Rate and NDCG Evaluation
+
+Evaluate model performance on sequential recommendation:
+
+```bash
+# For Stage 2 (without reasoning)
+python test/test_model_hitrate.py \
+  --merged_model_path basemodel/Qwen3-1.7B-stage2-merged \
+  --test_parquet_file data/training_prediction_sid_data_test.parquet \
+  --eval_mode sequential \
+  --sample_num 1000 \
+  --num_beams 10
+
+# For Stage 3/4 (with reasoning, no CoT)
+python test/test_model_hitrate.py \
+  --merged_model_path basemodel/Qwen3-1.7B-stage3-merged \
+  --test_parquet_file data/training_prediction_sid_data_test.parquet \
+  --eval_mode reasoning \
+  --sample_num 1000 \
+  --num_beams 10 \
+  --print_generations  # Optional: debug output
+
+# For Stage 3/4 (with CoT reasoning - recommended)
+python test/test_model_hitrate.py \
+  --merged_model_path basemodel/Qwen3-1.7B-stage4-merged \
+  --test_parquet_file data/training_prediction_sid_data_test.parquet \
+  --eval_mode reasoning \
+  --num_beams 10 \
+  --test_batch_size 8 \
+  --enable_cot
+```
+
+**Evaluation modes**:
+- `sequential`: Direct item prediction (Stage 2 format)
+- `reasoning`: CoT reasoning + item prediction (Stage 3/4 format)
+
+**Metrics**:
+- Hit@K (K=10, 20, 50, 100)
+- NDCG@K (K=10, 20, 50, 100)
+
+---
+
+## Hyperparameters
+
+### Stage 1: Itemic Alignment
+| Parameter | Value |
+|-----------|-------|
+| Epochs | 6 |
+| Batch size | 2 |
+| Learning rate | 1e-4 |
+| Trainable | Embeddings only |
+
+### Stage 2: Multi-task Learning
+| Parameter | Value |
+|-----------|-------|
+| Epochs | 6 |
+| Batch size | 1 |
+| Max sequence length | 4096 |
+| Learning rate | 2e-5 |
+| LoRA rank (r) | 64 |
+| LoRA alpha | 128 |
+| LoRA dropout | 0.05 |
+| Weight decay | 0.01 |
+
+### Stage 3: Reasoning Activation
+| Parameter | Value |
+|-----------|-------|
+| Epochs | 6 |
+| Batch size | 16 |
+| Learning rate | 2e-5 |
+| LoRA rank (r) | 64 |
+| LoRA alpha | 128 |
+| LoRA dropout | 0.05 |
+| Weight decay | 0.01 |
+
+### Stage 4: Reasoning Enhancement (GRPO)
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Epochs | 6 | With early stopping enabled |
+| Batch size | 16 | |
+| Learning rate | 1e-5 | |
+| \|G\| | 16 | CoT paths sampled per prompt |
+| K | 32 | Beam width for reward |
+| β | 0.001 | KL divergence coefficient |
+| ε | 0.2 | PPO clip ratio |
+| Temperature | 1.0 | Sampling temperature |
+| Max new tokens | 512 | Max generation length |
+| Early stopping patience | 2 | Evaluations without improvement |
+| Early stopping min steps | 30000 | Steps before stopping enabled |
+| Optimal checkpoint | ~40-50k | Based on eval reward analysis |
+
+---
+
+## Additional Notes
+
+### Weights & Biases Integration
+
+All training stages log to W&B. Configure with environment variables:
+```bash
+export WANDB_API_KEY="your-key"
+export WANDB_PROJECT="onerec-think"
+export WANDB_MODE="online"
+```
+
+Run names are auto-generated with timestamps (e.g., `stage3-RA-2026-01-10-noon`).
+
+### GPU Memory Requirements
+
+| Stage | GPU Memory | Notes |
+|-------|------------|-------|
+| Stage 1 | ~8 GB | Embeddings only |
+| Stage 2 | ~20 GB | LoRA, batch size 1 |
+| Stage 3 | ~24 GB | LoRA, batch size 16 |
+| Stage 4 | ~40 GB | GRPO with 16 generations |
+
+### GH200 (ARM64 + H100) Setup
+
+For NVIDIA GH200:
+- Install CUDA-enabled aarch64 PyTorch (CUDA ≥ 12.2 / SM90)
+- Use GPU Faiss: `pip install faiss-gpu`
+- Ensure CUDA libs are visible via `LD_LIBRARY_PATH`
+
+### Semantic ID (SID) Token Format
+
+Items are represented using hierarchical semantic IDs:
+```
+<|item_begin|><s_a_X><s_b_X><s_c_X><s_d_X><|item_end|>
+```
+
+Where `X` is the cluster ID for each codebook level (a, b, c, d).
+
+### Troubleshooting
+
+**Training crashes with OOM**: Reduce batch size or enable gradient checkpointing.
+
+**Zero hit rates during evaluation**: Ensure:
+1. Correct `eval_mode` for the model stage
+2. Proper item token format (`<|item_begin|>` vs `<|sid_begin|>`)
+3. Constrained decoding is enabled for beam search
+
+**Stage 4 rewards all zero**: Check that:
+1. SID tokens are preserved during decoding (tokenizer patching)
+2. Target items are in the reward function's lookup table
+
+---
+
+## Citation
+
+If you use OneRec-Think in your research, please cite:
+
+```bibtex
+@article{onerec-think,
+  title={OneRec-Think: A Unified Framework for Dialogue, Reasoning, and Recommendation},
+  author={...},
+  year={2024}
+}
+```
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

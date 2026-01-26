@@ -51,6 +51,15 @@ def parse_args():
                         help="test metrics, separate by comma")
     parser.add_argument("--filter_items", action="store_true", default=False,
                         help="whether filter illegal items")
+    parser.add_argument("--global_trie_file", type=str, default=None,
+                        help="Optional global trie pickle; if omitted, decoding is unconstrained.")
+    parser.add_argument("--fix_mistral_regex", action="store_true", default=True,
+                        help="Fix tokenizer regex for mistral-style tokenizers (default: on).")
+    parser.add_argument("--no_fix_mistral_regex", action="store_true", default=False,
+                        help="Disable mistral regex fix.")
+    parser.add_argument("--eval_mode", type=str, default="sequential",
+                        choices=["sequential", "reasoning"],
+                        help="Evaluation prompt mode: 'sequential' (Stage2-style prompt) or 'reasoning' (Stage3-style prompt with think block).")
 
     parser.add_argument("--max_new_tokens", type=int, default=50,
                         help="maximum number of new tokens to generate")
@@ -67,8 +76,6 @@ def parse_args():
     parser.add_argument("--log_file", type=str,
                         default="./logs/two_stage_test.log",
                         help="all output log file path")
-    parser.add_argument("--global_trie_file", type=str, default=None,
-                        help="Pre-computed global trie file for parallel evaluation")
     
     return parser.parse_args()
 
@@ -106,10 +113,9 @@ def setup_logging(log_file):
 
 
 def format_chat_prompt(user_content):
-    """Format input as chat format prompt"""
+    """Legacy prompt (unused after eval_mode switch)."""
     system_message = "You are a professional recommendation expert who needs to recommend the next possible purchase for users based on their purchase history. Please predict the most likely next product that the user will purchase based on the user's historical purchase information."
-    
-    chat_prompt = f"""<|im_start|>system
+    return f"""<|im_start|>system
 {system_message}<|im_end|>
 <|im_start|>user
 {user_content}<|im_end|>
@@ -118,14 +124,89 @@ def format_chat_prompt(user_content):
 
 </think>
 """
-    return chat_prompt
 
 
-def load_merged_model(model_path, additional_lora_path=None, logger=None):
+# Match training formatting
+sid_block_pattern = re.compile(
+    r"(?:<\|sid_begin\|>.*?<\|sid_end\|>)(?:\s*<\|sid_begin\|>.*?<\|sid_end\|>)*"
+)
+sid_inner = re.compile(r"<\|sid_begin\|>(.*?)<\|sid_end\|>")
+
+
+def to_item_tokens(text: str) -> str:
+    """
+    Convert SID tokens to paper-style item tokens, collapsing consecutive sid blocks
+    into a single <|item_begin|>...<|item_end|>.
+    """
+    def repl(match: re.Match) -> str:
+        group = match.group(0)
+        parts = []
+        for inner in sid_inner.findall(group):
+            inner = inner.strip()
+            if inner:
+                parts.append(inner)
+        return "<|item_begin|>" + "".join(parts) + "<|item_end|>"
+
+    return sid_block_pattern.sub(repl, text)
+
+
+def build_prompt(user_content: str, mode: str = "sequential") -> str:
+    """
+    mode == sequential: Stage2-style prompt (no reasoning), identical to training_multitask.py sequential task.
+    mode == reasoning: Stage3-style prompt (with <think></think> block), identical to train_ra.py formatting.
+    """
+    if mode == "sequential":
+        system_message = (
+            "You are a sequential recommendation engine. Your task is to analyze the provided "
+            "sequence of user-item interactions and predict the single next item the user is most likely to engage with."
+        )
+        # user_content should already be SID list; convert to item tokens to match training
+        user_block = f"User interaction history: {to_item_tokens(user_content)}\nPredict the next item."
+        assistant_prefix = "The next recommended item is "
+        return f"""<|im_start|>system
+{system_message}<|im_end|>
+<|im_start|>user
+{user_block}<|im_end|>
+<|im_start|>assistant
+{assistant_prefix}"""
+
+    elif mode == "reasoning":
+        # Match train_ra.py formatting: system message + user description (converted to item tokens)
+        # Let the model generate <think>...</think> followed by item token
+        system_message = (
+            "You are a professional recommendation expert who needs to recommend the next possible purchase for users based on their purchase history. "
+            "Please predict the most likely next product that the user will purchase based on the user's historical purchase information."
+        )
+        # Convert SID format to item format like training does
+        user_content_converted = to_item_tokens(user_content)
+        return f"""<|im_start|>system
+{system_message}<|im_end|>
+<|im_start|>user
+{user_content_converted}<|im_end|>
+<|im_start|>assistant
+"""
+    else:
+        raise ValueError(f"Unknown eval_mode: {mode}")
+
+
+def load_merged_model(model_path, additional_lora_path=None, logger=None, fix_mistral_regex=True):
     """Load pre-merged model and tokenizer, optionally with additional LoRA"""
     logger.info(f"Loading merged model from: {model_path}")
     
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    tokenizer_source = additional_lora_path if additional_lora_path and os.path.exists(additional_lora_path) else model_path
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_source, fix_mistral_regex=fix_mistral_regex)
+    # Ensure critical tokens exist; only add if missing to avoid random embeddings overriding trained ones.
+    probe_token = '<s_a_0>'
+    needs_add = tokenizer.convert_tokens_to_ids(probe_token) == tokenizer.unk_token_id
+    added = 0
+    if needs_add:
+        special_tokens = ['<|sid_begin|>', '<|sid_end|>', '<|item_begin|>', '<|item_end|>']
+        for prefix in ['s_a', 's_b', 's_c', 's_d']:
+            for i in range(256):
+                special_tokens.append(f'<{prefix}_{i}>')
+        added = tokenizer.add_special_tokens({'additional_special_tokens': special_tokens})
+        if logger:
+            logger.info(f"Tokenizer missing SID/item tokens; added {added} special tokens; will resize embeddings.")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # Set left padding for generation
@@ -142,6 +223,8 @@ def load_merged_model(model_path, additional_lora_path=None, logger=None):
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True
         )
+        if needs_add and added > 0:
+            model.resize_token_embeddings(len(tokenizer))
         
         # Force move to GPU
         logger.info(f"Moving model to {device}...")
@@ -160,6 +243,8 @@ def load_merged_model(model_path, additional_lora_path=None, logger=None):
             model_path,
             torch_dtype=torch.float32
         )
+        if needs_add and added > 0:
+            model.resize_token_embeddings(len(tokenizer))
     
     logger.info(f"Merged model loaded successfully, tokenizer vocab size: {tokenizer.vocab_size}")
     
@@ -244,7 +329,7 @@ class ParquetTestDataset(Dataset):
         """Create prefix allowed tokens function for SID constrained generation based on all items in test set"""
         
         if not global_trie_file:
-            raise ValueError("Global trie file path must be provided")
+            return None
         
         if not os.path.exists(global_trie_file):
             raise FileNotFoundError(f"Global trie file not found: {global_trie_file}. Please run precompute_global_trie.py first.")
@@ -356,8 +441,8 @@ class TestCollator:
         
         for d in batch:
             message = d["input_ids"]
-            # Format as chat prompt
-            prompt_text = format_chat_prompt(message)
+            # Format as chat prompt according to eval_mode
+            prompt_text = build_prompt(message, mode=self.args.eval_mode)
             batch_prompts.append(prompt_text)
         
         return {
@@ -366,23 +451,128 @@ class TestCollator:
         }
 
 
-def extract_sid_from_text(text):
-    """Extract SID part from text, return only the SID tokens"""
+def extract_item_from_text(text):
+    """Extract item tokens from text, normalize to <|item_begin|>...<|item_end|> format"""
     import re
-    # Pattern to match SID: <|sid_begin|><s_a_X><s_b_X><s_c_X><s_d_X><|sid_end|>
-    sid_pattern = r'<\|sid_begin\|><s_a_\d+><s_b_\d+><s_c_\d+><s_d_\d+><\|sid_end\|>'
-    match = re.search(sid_pattern, text)
+    # Pattern to match item: <|item_begin|><s_a_X><s_b_X><s_c_X><s_d_X><|item_end|>
+    item_pattern = r'<\|item_begin\|><s_a_\d+><s_b_\d+><s_c_\d+><s_d_\d+><\|item_end\|>'
+    match = re.search(item_pattern, text)
     if match:
         return match.group(0)
+    # Handle SID block form: <|sid_begin|><s_a_*><s_b_*><s_c_*><s_d_*><|sid_end|>
+    # Convert to item format
+    sid_pattern = r'<\|sid_begin\|>(<s_a_\d+><s_b_\d+><s_c_\d+><s_d_\d+>)<\|sid_end\|>'
+    match_sid = re.search(sid_pattern, text)
+    if match_sid:
+        inner = match_sid.group(1)
+        return f"<|item_begin|>{inner}<|item_end|>"
     return text.strip()
 
-def extract_all_sids_from_text(text):
-    """Extract all SID tokens from text, return a list of SID strings"""
+def extract_all_items_from_text(text):
+    """Extract all item tokens from text, return a list of item strings in <|item_begin|>...<|item_end|> format"""
     import re
-    # Pattern to match SID: <|sid_begin|><s_a_X><s_b_X><s_c_X><s_d_X><|sid_end|>
-    sid_pattern = r'<\|sid_begin\|><s_a_\d+><s_b_\d+><s_c_\d+><s_d_\d+><\|sid_end\|>'
-    matches = re.findall(sid_pattern, text)
-    return matches
+    results = []
+    # First try item pattern
+    item_pattern = r'<\|item_begin\|><s_a_\d+><s_b_\d+><s_c_\d+><s_d_\d+><\|item_end\|>'
+    matches = re.findall(item_pattern, text)
+    results.extend(matches)
+    # Also check for SID pattern and convert
+    sid_pattern = r'<\|sid_begin\|>(<s_a_\d+><s_b_\d+><s_c_\d+><s_d_\d+>)<\|sid_end\|>'
+    for match in re.finditer(sid_pattern, text):
+        inner = match.group(1)
+        results.append(f"<|item_begin|>{inner}<|item_end|>")
+    return results
+
+
+def build_allowed_token_fn_from_trie(tokenizer, trie_path, logger=None):
+    """
+    Build a prefix_allowed_tokens_fn using the precomputed exact trie (test/precompute_global_trie.py).
+    """
+    import pickle
+    if not trie_path or not os.path.exists(trie_path):
+        return None
+    with open(trie_path, 'rb') as f:
+        trie_data = pickle.load(f)
+    exact_trie = trie_data['exact_trie']
+    max_depth = trie_data.get('max_length', 0)
+    sid_begin_id = tokenizer.convert_tokens_to_ids('<|sid_begin|>')
+    sid_end_id = tokenizer.convert_tokens_to_ids('<|sid_end|>')
+
+    def fn(batch_id, generated_ids):
+        # generated_ids is a list of token ids for current hypothesis
+        pos = len(generated_ids)
+        # If beyond trie depth, only allow eos
+        if pos >= max_depth:
+            return [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else [sid_end_id]
+        # At start, force sid_begin
+        if pos == 0:
+            return [sid_begin_id]
+        # Use trie map for current position-1 token
+        prev_token = generated_ids[-1]
+        mapping = exact_trie.get(pos - 1, {})
+        allowed = mapping.get(prev_token, None)
+        if allowed is None:
+            # fallback: allow end or eos
+            return [sid_end_id, tokenizer.eos_token_id]
+        return list(allowed)
+
+    if logger:
+        logger.info(f"✅ Using trie-based constrained decoding from {trie_path} (depth {max_depth})")
+    return fn
+
+
+def build_positional_sid_constraint(tokenizer, prompt_length, logger=None):
+    """
+    Build a simple positional allowlist for ITEM tokens (as trained in Stage 2):
+      pos0: <|item_begin|>
+      pos1: all <s_a_*>
+      pos2: all <s_b_*>
+      pos3: all <s_c_*>
+      pos4: all <s_d_*>
+      pos5: <|item_end|>
+      pos6: eos to stop
+    
+    NOTE: Stage 2 training uses <|item_begin|>...<|item_end|> NOT <|sid_begin|>...<|sid_end|>
+    """
+    vocab = tokenizer.get_vocab()
+    item_begin = tokenizer.convert_tokens_to_ids("<|item_begin|>")
+    item_end = tokenizer.convert_tokens_to_ids("<|item_end|>")
+    eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else item_end
+
+    def gather(prefix):
+        return sorted([tid for tok, tid in vocab.items() if tok.startswith(prefix)])
+
+    a_ids = gather("<s_a_")
+    b_ids = gather("<s_b_")
+    c_ids = gather("<s_c_")
+    d_ids = gather("<s_d_")
+
+    positions = {
+        0: [item_begin],
+        1: a_ids,
+        2: b_ids,
+        3: c_ids,
+        4: d_ids,
+        5: [item_end],  # Force item_end
+        6: [eos_id],    # After item_end, allow eos to stop
+    }
+
+    def fn(batch_id, generated_ids):
+        # generated_ids is the FULL sequence (prompt + generated)
+        # We need to calculate how many NEW tokens have been generated
+        new_token_count = len(generated_ids) - prompt_length
+        if new_token_count < 0:
+            new_token_count = 0
+        if new_token_count in positions:
+            return positions[new_token_count]
+        # After position 6, allow eos only
+        return [eos_id]
+
+    if logger:
+        logger.info("✅ Using positional ITEM constraint (item_begin -> a -> b -> c -> d -> item_end/eos)")
+        logger.info(f"Counts: a={len(a_ids)} b={len(b_ids)} c={len(c_ids)} d={len(d_ids)}")
+        logger.info(f"Prompt length for constraint: {prompt_length}")
+    return fn
 
 def get_topk_results(predictions, scores, targets, k, all_items=None):
     """Extract top-k results from predictions"""
@@ -392,7 +582,7 @@ def get_topk_results(predictions, scores, targets, k, all_items=None):
     predictions = [_.strip().replace(" ", "") for _ in predictions]
     
     # Extract only SID parts from both predictions and targets
-    predictions = [extract_sid_from_text(pred) for pred in predictions]
+    predictions = [extract_item_from_text(pred) for pred in predictions]
     
     if all_items is not None:
         for i, seq in enumerate(predictions):
@@ -407,7 +597,7 @@ def get_topk_results(predictions, scores, targets, k, all_items=None):
         sorted_pairs = sorted(pairs, key=lambda x: x[1], reverse=True)
         
         # Extract SID from target as well
-        target_item = extract_sid_from_text(targets[b])
+        target_item = extract_item_from_text(targets[b])
         
         one_results = []
         for pred_seq, pred_score in sorted_pairs:
@@ -465,7 +655,7 @@ def extract_assistant_response(generated_text):
     if "</think>" in generated_text:
         response_part = generated_text.split("</think>")[-1].strip()
         # Extract only the SID part using the existing function
-        return extract_sid_from_text(response_part)
+        return extract_item_from_text(response_part)
     
     # Fallback to assistant pattern
     if "<|im_start|>assistant" in generated_text:
@@ -475,10 +665,10 @@ def extract_assistant_response(generated_text):
             if "<|im_end|>" in assistant_response:
                 assistant_response = assistant_response.split("<|im_end|>")[0]
             # Extract only the SID part from the assistant response
-            return extract_sid_from_text(assistant_response.strip())
+            return extract_item_from_text(assistant_response.strip())
     
     # Final fallback - try to extract SID from the entire text
-    return extract_sid_from_text(generated_text)
+    return extract_item_from_text(generated_text)
 
 
 def run_evaluation(args):
@@ -492,9 +682,10 @@ def run_evaluation(args):
     logger.info("=" * 60)
     logger.info("Loading merged model...")
     final_model, tokenizer = load_merged_model(
-        args.merged_model_path, 
-        args.additional_lora_path, 
-        logger
+        args.merged_model_path,
+        args.additional_lora_path,
+        logger,
+        fix_mistral_regex=not args.no_fix_mistral_regex,
     )
     final_model.eval()
     
@@ -504,11 +695,14 @@ def run_evaluation(args):
         raise FileNotFoundError(f"Parquet file not found: {args.test_parquet_file}")
     
     test_dataset = ParquetTestDataset(args.test_parquet_file, args.sample_num, args.sample_offset, logger)
-    prefix_allowed_tokens_fn = test_dataset.get_prefix_allowed_tokens_fn(tokenizer, args.global_trie_file)
+    # Note: positional constraint will be built per-batch inside the loop (needs prompt_length)
+    use_positional_constraint = args.global_trie_file is not None
     logger.info(f"Using parquet file: {args.test_parquet_file}")
-    if args.global_trie_file:
-        logger.info(f"✅ Global trie file: {args.global_trie_file}")
-    logger.info("✅ SID constrained generation enabled")
+    if use_positional_constraint:
+        logger.info("✅ SID constrained generation enabled (positional allowlist, built per-batch)")
+    else:
+        logger.info("ℹ️ Running unconstrained decoding")
+    logger.info(f"🔧 Eval mode: {args.eval_mode} (sequential matches Stage2; reasoning matches Stage3)")
     
     collator = TestCollator(args, tokenizer)
     test_loader = DataLoader(
@@ -560,71 +754,135 @@ def run_evaluation(args):
                 progress_info = f"Testing: {progress_pct*100:3.0f}%|{bar}| {current_step}/{total_steps} [{elapsed_str}<{remaining_str}, {avg_time:.2f}s/it]"
                 logger.info(progress_info)
             
-            # === Skip CoT Think stage - generate SID directly ===
-            think_texts = [""] * bs
-            logger.info(f"🚀 Skipping CoT Think stage - generating SID directly for batch {step}...")
-
-            # === Generate SID directly (no CoT, no Response: prefix) ===
-            # Use the formatted prompt as-is, which ends with </think>\n
-            response_inputs_texts = inputs_texts
-            
-            # Encode inputs
-            enc = tokenizer(
-                response_inputs_texts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=tokenizer.model_max_length
-            )
-            enc = {k: v.to(final_model.device) for k, v in enc.items()}
-            
-            # Debug: Check tensor devices in Response stage  
-            logger.info(f"🔍 Response stage device info:")
-            logger.info(f"  Input tensor device: {enc['input_ids'].device}")
-            logger.info(f"  Model device: {next(final_model.parameters()).device}")
-            
-            # Beam search generation
+            # Define num_beams early (needed for later processing)
             num_beams = args.num_beams
-            while True:
-                try:
-                    generate_kwargs = {
-                        "input_ids": enc["input_ids"],
-                        "attention_mask": enc.get("attention_mask", None),
-                        "max_new_tokens": args.max_new_tokens,
-                        "num_beams": num_beams,
-                        "num_return_sequences": num_beams,
-                        "output_scores": True,
-                        "return_dict_in_generate": True,
-                        "early_stopping": True,
-                        "temperature": args.temperature,
-                        "top_p": args.top_p,
-                    }
-                    
-                    # Add SID constrained generation
-                    if prefix_allowed_tokens_fn is not None:
-                        generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed_tokens_fn
-                    
-                    output = final_model.generate(**generate_kwargs)
-                    break
-                except RuntimeError as e:
-                    err = str(e).lower()
-                    if "out of memory" in err or "cuda" in err:
-                        logger.warning(f"CUDA OOM with beam={num_beams}. Reducing beam size.")
-                        num_beams -= 1
-                        if num_beams < 1:
-                            raise RuntimeError("Beam search OOM even with beam=1") from e
-                        torch.cuda.empty_cache()
-                    else:
-                        raise
             
-            # Decode output
-            output_ids = output["sequences"]
-            scores = output.get("sequences_scores", None)
-            decoded = tokenizer.batch_decode(
-                output_ids,
-                skip_special_tokens=False,
-                clean_up_tokenization_spaces=False,
-            )
+            # === CoT Think stage (if enabled) ===
+            if args.enable_cot:
+                logger.info(f"🧠 Generating CoT reasoning for batch {step}...")
+                # Generate reasoning with <think>...</think> block
+                cot_enc = tokenizer(
+                    inputs_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=tokenizer.model_max_length
+                )
+                cot_enc = {k: v.to(final_model.device) for k, v in cot_enc.items()}
+                
+                # Generate CoT reasoning (unconstrained)
+                cot_outputs = final_model.generate(
+                    input_ids=cot_enc["input_ids"],
+                    attention_mask=cot_enc.get("attention_mask", None),
+                    max_new_tokens=args.think_max_tokens + args.max_new_tokens,  # Allow reasoning + item
+                    num_beams=args.num_beams,
+                    num_return_sequences=args.num_beams,
+                    output_scores=True,
+                    return_dict_in_generate=True,
+                    early_stopping=True,
+                    do_sample=False,
+                )
+                
+                # Decode all sequences
+                all_cot_texts = tokenizer.batch_decode(cot_outputs.sequences, skip_special_tokens=False)
+                
+                # Store think texts and full outputs for later processing
+                think_texts = []
+                full_cot_outputs = []
+                for i in range(bs):
+                    beam_outputs = all_cot_texts[i * args.num_beams : (i + 1) * args.num_beams]
+                    full_cot_outputs.append(beam_outputs)
+                    # Extract think content from first beam
+                    if "</think>" in beam_outputs[0]:
+                        think_part = beam_outputs[0].split("</think>")[0]
+                        if "<think>" in think_part:
+                            think_part = think_part.split("<think>")[-1]
+                        think_texts.append(think_part.strip())
+                    else:
+                        think_texts.append("")
+            else:
+                logger.info(f"🚀 Skipping CoT Think stage - generating SID directly for batch {step}...")
+                think_texts = [""] * bs
+                full_cot_outputs = None
+
+            # === Generate SID (either from CoT outputs or directly) ===
+            if args.enable_cot and full_cot_outputs is not None:
+                # Use the already-generated CoT outputs
+                logger.info(f"🔍 Using CoT outputs for batch {step}")
+                # Flatten full_cot_outputs for processing
+                decoded = []
+                for beam_outputs in full_cot_outputs:
+                    decoded.extend(beam_outputs)
+                scores = None  # Scores not available from CoT generation in this format
+            else:
+                # Generate SID directly (no CoT)
+                response_inputs_texts = inputs_texts
+                
+                # Encode inputs
+                enc = tokenizer(
+                    response_inputs_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=tokenizer.model_max_length
+                )
+                enc = {k: v.to(final_model.device) for k, v in enc.items()}
+                
+                # Debug: Check tensor devices in Response stage  
+                logger.info(f"🔍 Response stage device info:")
+                logger.info(f"  Input tensor device: {enc['input_ids'].device}")
+                logger.info(f"  Model device: {next(final_model.parameters()).device}")
+                
+                # Build positional constraint per-batch with correct prompt_length
+                prompt_length = enc["input_ids"].shape[1]
+                prefix_allowed_tokens_fn = None
+                if use_positional_constraint:
+                    prefix_allowed_tokens_fn = build_positional_sid_constraint(
+                        tokenizer, prompt_length, logger=None  # Don't log per-batch
+                    )
+                
+                # Beam search generation
+                num_beams = args.num_beams
+                while True:
+                    try:
+                        generate_kwargs = {
+                            "input_ids": enc["input_ids"],
+                            "attention_mask": enc.get("attention_mask", None),
+                            "max_new_tokens": args.max_new_tokens,
+                            "num_beams": num_beams,
+                            "num_return_sequences": num_beams,
+                            "output_scores": True,
+                            "return_dict_in_generate": True,
+                            "early_stopping": True,
+                            "temperature": args.temperature,
+                            "top_p": args.top_p,
+                        }
+                        
+                        # Add SID constrained generation
+                        if prefix_allowed_tokens_fn is not None:
+                            generate_kwargs["prefix_allowed_tokens_fn"] = prefix_allowed_tokens_fn
+                        
+                        output = final_model.generate(**generate_kwargs)
+                        break
+                    except RuntimeError as e:
+                        err = str(e).lower()
+                        if "out of memory" in err or "cuda" in err:
+                            logger.warning(f"CUDA OOM with beam={num_beams}. Reducing beam size.")
+                            num_beams -= 1
+                            if num_beams < 1:
+                                raise RuntimeError("Beam search OOM even with beam=1") from e
+                            torch.cuda.empty_cache()
+                        else:
+                            raise
+                
+                # Decode output
+                output_ids = output["sequences"]
+                scores = output.get("sequences_scores", None)
+                decoded = tokenizer.batch_decode(
+                    output_ids,
+                    skip_special_tokens=False,
+                    clean_up_tokenization_spaces=False,
+                )
             
             # Process scores (always needed for metrics calculation)
             if scores is not None:
@@ -654,7 +912,7 @@ def run_evaluation(args):
                     for j, (c, sc) in enumerate(zip(cands, cand_scores)):
                         response = extract_assistant_response(c)
                         logger.info(f"  Rank {j+1}: score={sc:.4f} → {response}")
-                    logger.info(f"TARGET: {targets[i]}")
+                    logger.info(f"TARGET: {extract_item_from_text(targets[i])}")
                     logger.info("-" * 50)
             
             # Calculate topk results (no additional filtering needed since exact trie already constrains generation)

@@ -6,9 +6,28 @@ from datasets import Dataset
 from peft import get_peft_model, LoraConfig, TaskType, PeftModel
 import random
 import os
+import re
 import torch
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
+
+# Convert <|sid_begin|>...<|sid_end|> to <|item_begin|>...<|item_end|> for consistency
+sid_block_pattern = re.compile(
+    r"(?:<\|sid_begin\|>.*?<\|sid_end\|>)(?:\s*<\|sid_begin\|>.*?<\|sid_end\|>)*"
+)
+sid_inner = re.compile(r"<\|sid_begin\|>(.*?)<\|sid_end\|>")
+
+def to_item_tokens(text: str) -> str:
+    """Convert SID tokens to item tokens for consistency with training format."""
+    def repl(match: re.Match) -> str:
+        group = match.group(0)
+        parts = []
+        for inner in sid_inner.findall(group):
+            inner = inner.strip()
+            if inner:
+                parts.append(inner)
+        return "<|item_begin|>" + "".join(parts) + "<|item_end|>"
+    return sid_block_pattern.sub(repl, text)
 
 @dataclass
 class ModelArguments:
@@ -47,16 +66,20 @@ def prepare_chat_dataset(data_path, sample_size=None, local_rank=0):
     system_message = "You are a professional recommendation expert who needs to recommend the next possible purchase for users based on their purchase history. Please predict the most likely next product that the user will purchase based on the user's historical purchase information."
     
     for _, row in data_pq.iterrows():
+        # Convert SID format to item format for consistency
+        description = to_item_tokens(row['description'])
+        groundtruth = to_item_tokens(row['groundtruth'])
+        
         if('title' in row.keys() and row['title'] is not None):
             title = row['title']
             categories = row['categories']
-            assistant_content = f"<think>\nThe user is likely to buy items in {categories} category\n</think>\n{row['groundtruth']}"
+            assistant_content = f"<think>\nThe user is likely to buy items in {categories} category\n</think>\n{groundtruth}"
         else:
-            assistant_content = f"<think>\n\n</think>\n{row['groundtruth']}"
+            assistant_content = f"<think>\n\n</think>\n{groundtruth}"
         formatted_text = f"""<|im_start|>system
 {system_message}<|im_end|>
 <|im_start|>user
-{row['description']}<|im_end|>
+{description}<|im_end|>
 <|im_start|>assistant
 {assistant_content}<|im_end|>
 """
@@ -92,8 +115,11 @@ def tokenize_function(examples, tokenizer):
 def get_special_tokens():
     special_tokens = []
 
+    # Add both sid and item boundary tokens
     special_tokens.append('<|sid_begin|>')
     special_tokens.append('<|sid_end|>')
+    special_tokens.append('<|item_begin|>')
+    special_tokens.append('<|item_end|>')
 
     max_range = 256
     for prefix in ['s_a', 's_b', 's_c', 's_d']:
@@ -242,7 +268,10 @@ if __name__ == "__main__":
 
     if training_args.local_rank == 0:
         print(f"\\nLoading validation dataset...")
-    val_data_path = '../data/training_RA_val.parquet'
+    # Derive val path from train path
+    import pathlib
+    train_path = pathlib.Path(model_args.data_path)
+    val_data_path = str(train_path.parent / train_path.name.replace('_train.', '_val.'))
     val_dataset = prepare_chat_dataset(val_data_path, local_rank=training_args.local_rank)
     if training_args.local_rank == 0:
         print(f"Loaded raw validation dataset, total samples: {len(val_dataset)}")

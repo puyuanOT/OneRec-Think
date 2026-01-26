@@ -77,7 +77,7 @@ Persona text:<|im_end|>
         print("\nFirst 3 text examples (full text):")
         for i, text in enumerate(texts[:3]):
             print(f"  [{i}]: {text}")
-
+    
     dataset_dict = {"text": texts}
     return Dataset.from_dict(dataset_dict)
 
@@ -117,7 +117,7 @@ def load_sid_tokens(tokenizer, sid_vocab_file: Path | None = None) -> List[str]:
 
     # Always include boundary markers (they should already be in the tokenizer)
     for marker in ("<|sid_begin|>", "<|sid_end|>", "<|item_begin|>", "<|item_end|>"):
-        tokens.append(marker)
+            tokens.append(marker)
 
     # de-dup while preserving order
     seen = set()
@@ -198,8 +198,8 @@ if __name__ == "__main__":
             continue
         if tokenizer.unk_token_id is not None and token_id == tokenizer.unk_token_id:
             continue
-        valid_special_token_ids.append(token_id)
-        valid_special_tokens.append(special_tokens[i])
+            valid_special_token_ids.append(token_id)
+            valid_special_tokens.append(special_tokens[i])
     
     if len(valid_special_token_ids) == 0:
         raise ValueError("No valid SID tokens found in tokenizer. Ensure the SID-expanded tokenizer is used and sid_vocab_used.txt exists.")

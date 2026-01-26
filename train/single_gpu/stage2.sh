@@ -86,7 +86,7 @@ python ./scripts/train_multitask.py \
   --lora_target_modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
   --per_device_train_batch_size 1 \
   --per_device_eval_batch_size 1 \
-  --num_train_epochs 2 \
+  --num_train_epochs 6 \
   --gradient_checkpointing True \
   --bf16 True \
   --output_dir "${OUTPUT_DIR}" \
@@ -108,4 +108,47 @@ python ./scripts/train_multitask.py \
   --max_grad_norm 1.0 \
   --dataloader_num_workers 2 \
   --remove_unused_columns False
+
+# ============================================================
+# Merge Stage 2 LoRA into base model and save to basemodel folder
+# ============================================================
+STAGE2_MERGED_OUTPUT="${ROOT_DIR}/../basemodel/Qwen3-1.7B-stage2-merged"
+
+echo "[stage2] Merging Stage 2 LoRA adapter into base model..."
+python - <<PY
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+from pathlib import Path
+import shutil
+
+base_model_path = Path("${MERGED_MODEL}")
+lora_adapter_path = Path("${OUTPUT_DIR}")
+output_path = Path("${STAGE2_MERGED_OUTPUT}")
+
+print(f"Base model: {base_model_path}")
+print(f"LoRA adapter: {lora_adapter_path}")
+print(f"Output path: {output_path}")
+
+if output_path.exists():
+    print(f"Removing existing output directory: {output_path}")
+    shutil.rmtree(output_path)
+
+print("Loading base model...")
+model = AutoModelForCausalLM.from_pretrained(base_model_path, device_map="cpu")
+tokenizer = AutoTokenizer.from_pretrained(base_model_path)
+
+print("Loading and merging LoRA adapter...")
+model_with_lora = PeftModel.from_pretrained(model, lora_adapter_path)
+merged_model = model_with_lora.merge_and_unload()
+
+print(f"Saving merged model to {output_path}...")
+output_path.mkdir(parents=True, exist_ok=True)
+merged_model.save_pretrained(output_path)
+tokenizer.save_pretrained(output_path)
+
+print(f"✓ Stage 2 merged model saved to: {output_path}")
+PY
+
+echo "[stage2] Stage 2 training and merging completed!"
+echo "[stage2] Merged model saved to: ${STAGE2_MERGED_OUTPUT}"
 
