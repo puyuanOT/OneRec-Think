@@ -39,6 +39,14 @@ from trl import GRPOConfig, GRPOTrainer
 from peft import PeftModel, LoraConfig, get_peft_model
 from transformers import TrainerCallback, TrainerState, TrainerControl
 
+# wandb for logging text samples
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+    print("[Warning] wandb not available, text sample logging disabled")
+
 
 # ============================================================
 # Early Stopping Callback
@@ -128,6 +136,117 @@ class EarlyStoppingOnRewardPlateau(TrainerCallback):
         for entry in self.eval_history:
             marker = " ← BEST" if entry['reward'] == self.best_reward else ""
             print(f"  Step {entry['step']:>6}: {entry['reward']:.6f}{marker}")
+
+
+class TextSamplesLoggingCallback(TrainerCallback):
+    """
+    Callback to log text samples to wandb during evaluation only.
+    
+    Logs a table with 50 samples showing:
+    - Input prompt (last N chars)
+    - Model's raw completion (reasoning + item)
+    - Target item
+    - Reward score
+    - Whether reasoning was present
+    """
+    
+    def __init__(
+        self,
+        tokenizer: AutoTokenizer,
+        prompt2target: Dict[str, str],
+        num_samples_per_eval: int = 50,
+        max_prompt_chars: int = 400,
+        max_completion_chars: int = 600,
+    ):
+        """
+        Args:
+            tokenizer: Tokenizer for decoding
+            prompt2target: Mapping from prompts to targets
+            num_samples_per_eval: Number of samples to log per evaluation
+            max_prompt_chars: Max chars to show from prompt
+            max_completion_chars: Max chars to show from completion
+        """
+        self.tokenizer = tokenizer
+        self.prompt2target = prompt2target
+        self.num_samples_per_eval = num_samples_per_eval
+        self.max_prompt_chars = max_prompt_chars
+        self.max_completion_chars = max_completion_chars
+        
+        # Store samples for current eval
+        self.eval_samples = []
+        self.is_evaluating = False
+    
+    def add_samples(self, prompts: List[str], completions: List[str], rewards: List[float], 
+                   beam_candidates: Optional[List[List[str]]] = None):
+        """Add samples to the eval queue (only during evaluation)."""
+        # Only collect samples if we haven't reached the limit
+        if len(self.eval_samples) >= self.num_samples_per_eval:
+            return
+            
+        for i, (prompt, completion, reward) in enumerate(zip(prompts, completions, rewards)):
+            if len(self.eval_samples) >= self.num_samples_per_eval:
+                break
+                
+            target = self.prompt2target.get(prompt, "")
+            beam_cands = beam_candidates[i] if beam_candidates else None
+            
+            self.eval_samples.append({
+                'prompt': prompt[-self.max_prompt_chars:] if len(prompt) > self.max_prompt_chars else prompt,
+                'completion': completion[:self.max_completion_chars] if len(completion) > self.max_completion_chars else completion,
+                'target': target,
+                'reward': reward,
+                'beam_candidates': beam_cands,
+            })
+    
+    def on_evaluate(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+        """Log samples at the end of evaluation."""
+        if not WANDB_AVAILABLE or wandb.run is None:
+            return
+        
+        if not self.eval_samples:
+            print(f"[TextSamples] No samples collected during eval")
+            return
+        
+        self._log_samples_to_wandb(state.global_step)
+    
+    def _log_samples_to_wandb(self, step: int):
+        """Log all collected eval samples to wandb as a Table."""
+        print(f"[TextSamples] Logging {len(self.eval_samples)} samples to wandb at step {step}")
+        try:
+            # Create wandb Table with all collected samples
+            columns = ["step", "prompt", "completion", "target", "reward", "has_reasoning", "predicted_item"]
+            table = wandb.Table(columns=columns)
+            
+            for sample in self.eval_samples:
+                has_reasoning = "<think>" in sample['completion'] and "</think>" in sample['completion']
+                # Extract predicted item from completion
+                pred_item = ""
+                if sample['beam_candidates']:
+                    pred_item = sample['beam_candidates'][0] if sample['beam_candidates'][0] else "NO_ITEM"
+                
+                table.add_data(
+                    step,
+                    sample['prompt'],
+                    sample['completion'],
+                    sample['target'],
+                    f"{sample['reward']:.4f}",
+                    "✓" if has_reasoning else "✗",
+                    pred_item,
+                )
+            
+            # Log the complete table to wandb
+            # Use a simple key without slashes so it appears in root/media/table
+            # Use commit=True to ensure the table is synced immediately
+            wandb.log({"text_samples": table}, commit=True)
+            print(f"[TextSamples] ✓ Successfully logged {len(self.eval_samples)} samples to wandb as 'text_samples'")
+            
+            # Clear samples for next eval
+            self.eval_samples = []
+            
+        except Exception as e:
+            print(f"[TextSamples] ✗ Failed to log: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # ============================================================
@@ -306,7 +425,7 @@ class RLRecommendationDataset(TorchDataset):
 # Reward Functions
 # ============================================================
 
-def create_item_token_constraint(tokenizer: AutoTokenizer):
+def create_item_token_constraint(tokenizer: AutoTokenizer, prompt_length: int = 0):
     """
     Create a constraint function for beam search that forces valid item token generation.
     
@@ -314,6 +433,10 @@ def create_item_token_constraint(tokenizer: AutoTokenizer):
     <|item_begin|> → <s_a_X> → <s_b_X> → <s_c_X> → <s_d_X> → <|item_end|>
     
     This aligns with the paper's "constrained beam" approach.
+    
+    Args:
+        tokenizer: The tokenizer
+        prompt_length: Length of the prompt in tokens (to ignore items in prompt)
     """
     # Get token IDs for special tokens
     item_begin_id = tokenizer.convert_tokens_to_ids("<|item_begin|>")
@@ -339,6 +462,13 @@ def create_item_token_constraint(tokenizer: AutoTokenizer):
           f"s_a={len(s_a_ids)}, s_b={len(s_b_ids)}, s_c={len(s_c_ids)}, s_d={len(s_d_ids)}, "
           f"item_end={item_end_id}")
     
+    # Store prompt length per batch (updated before each generation)
+    prompt_lengths = {}
+    
+    def set_prompt_length(batch_id: int, length: int):
+        """Set the prompt length for a specific batch item."""
+        prompt_lengths[batch_id] = length
+    
     def prefix_allowed_tokens_fn(batch_id: int, input_ids: torch.Tensor) -> List[int]:
         """
         Returns allowed tokens based on what has been generated so far.
@@ -351,15 +481,21 @@ def create_item_token_constraint(tokenizer: AutoTokenizer):
         4: <s_d_X>
         5: <|item_end|>
         """
-        # Find where the item generation started (after <|item_begin|> or from start)
         input_list = input_ids.tolist()
         
-        # Find the last occurrence of item_begin to determine position
+        # Get prompt length for this batch - only look at GENERATED tokens
+        # Use 0 if not set (fallback to original behavior)
+        pl = prompt_lengths.get(batch_id, prompt_length)
+        
+        # Only look at tokens generated AFTER the prompt
+        generated_tokens = input_list[pl:] if pl > 0 else input_list
+        
+        # Find item_begin in GENERATED tokens only
         try:
-            last_item_begin = len(input_list) - 1 - input_list[::-1].index(item_begin_id)
-            tokens_after_begin = len(input_list) - last_item_begin - 1
+            last_item_begin_in_gen = len(generated_tokens) - 1 - generated_tokens[::-1].index(item_begin_id)
+            tokens_after_begin = len(generated_tokens) - last_item_begin_in_gen - 1
         except ValueError:
-            # No item_begin yet, allow it
+            # No item_begin in generated tokens yet
             tokens_after_begin = -1
         
         if tokens_after_begin < 0:
@@ -384,6 +520,10 @@ def create_item_token_constraint(tokenizer: AutoTokenizer):
             # Already complete, allow EOS
             return [tokenizer.eos_token_id] if tokenizer.eos_token_id else [item_end_id]
     
+    # Attach helper method
+    prefix_allowed_tokens_fn.set_prompt_length = set_prompt_length
+    prefix_allowed_tokens_fn.prompt_lengths = prompt_lengths
+    
     return prefix_allowed_tokens_fn
 
 
@@ -395,6 +535,7 @@ def create_rollout_beam_reward(
     device: str = "cuda",
     max_item_tokens: int = 10,  # Items are ~6 tokens: <item_begin> + 4 s_X + <item_end>
     use_constrained_beam: bool = True,
+    text_logging_callback: Optional['TextSamplesLoggingCallback'] = None,
 ) -> Callable:
     """
     Create a Rollout-Beam reward function following the paper's Equation (6):
@@ -452,12 +593,20 @@ def create_rollout_beam_reward(
     print(f"   Constrained beam search: {use_constrained_beam}")
     print(f"   Each completion's reasoning leads to different beam candidates")
     
+    # Reasoning bonus to incentivize proper <think>...</think> blocks
+    REASONING_BONUS = 0.15  # Extra reward for having reasoning
+    NO_REASONING_PENALTY = 0.5  # Multiply score by this if no reasoning
+    
     def extract_reasoning(completion: str) -> str:
         """Extract reasoning from completion (everything up to and including </think>)."""
         match = re.search(r'(<think>.*?</think>)', completion, re.DOTALL)
         if match:
             return match.group(1)
         return ""
+    
+    def has_any_reasoning(completion: str) -> bool:
+        """Check if completion has any reasoning attempt (even incomplete)."""
+        return '<think>' in completion
     
     def reward_fn(prompts: List[str], completions: List[str], **kwargs) -> List[float]:
         """
@@ -468,6 +617,8 @@ def create_rollout_beam_reward(
         2. Run beam search conditioned on (prompt + τ) to get K candidates
         3. Score each candidate hierarchically
         4. Return max score as reward
+        
+        IMPORTANT: Completions WITHOUT proper <think>...</think> are penalized!
         """
         call_count[0] += 1
         rewards = []
@@ -476,6 +627,7 @@ def create_rollout_beam_reward(
         all_max_scores = []
         direct_scores = []  # Score of the actual generated item (for comparison)
         reasoning_count = 0
+        incomplete_reasoning_count = 0
         
         for i, (prompt, completion) in enumerate(zip(prompts, completions)):
             target = prompt2target.get(prompt, "")
@@ -494,9 +646,16 @@ def create_rollout_beam_reward(
             reasoning = extract_reasoning(completion)
             
             if not reasoning:
-                # No reasoning found - just use the direct score
+                # No proper reasoning found - PENALIZE this!
+                # Give reduced score to discourage skipping reasoning
+                has_attempt = has_any_reasoning(completion)
+                if has_attempt:
+                    incomplete_reasoning_count += 1
+                
+                # Penalized score: multiply by penalty factor
+                penalized_score = (direct_score / 4.0) * NO_REASONING_PENALTY
                 all_max_scores.append(direct_score)
-                rewards.append(direct_score / 4.0)
+                rewards.append(penalized_score)
                 continue
             
             reasoning_count += 1
@@ -509,6 +668,12 @@ def create_rollout_beam_reward(
             try:
                 with torch.no_grad():
                     inputs = tokenizer(context, return_tensors="pt").to(device)
+                    prompt_len = inputs['input_ids'].shape[1]
+                    
+                    # Set prompt length for constraint function (so it ignores items in prompt)
+                    if use_constrained_beam and prefix_allowed_tokens_fn is not None:
+                        for batch_id in range(beam_width):
+                            prefix_allowed_tokens_fn.set_prompt_length(batch_id, prompt_len)
                     
                     # Generate K candidates using beam search
                     outputs = model.generate(
@@ -525,15 +690,26 @@ def create_rollout_beam_reward(
                     
                     # Score each of the K candidates
                     scores = []
+                    candidates_debug = []
                     for output in outputs:
                         # Decode only the new tokens (the generated item)
                         new_tokens = output[inputs['input_ids'].shape[1]:]
                         candidate = tokenizer.decode(new_tokens, skip_special_tokens=False)
+                        candidates_debug.append(candidate[:100])  # First 100 chars for debug
                         score = compute_hierarchical_match_score(candidate, target)
                         scores.append(score)
                     
                     # Take max score across K candidates (Equation 6)
                     max_score = max(scores) if scores else 0
+                    
+                    # Debug: print first few samples
+                    if call_count[0] <= 3 and i == 0:
+                        print(f"\n[DEBUG] Beam search output sample:")
+                        print(f"   Target: {target[:100]}")
+                        print(f"   Target extracted: {extract_item_from_text(target)}")
+                        print(f"   Candidate 0: {candidates_debug[0] if candidates_debug else 'N/A'}")
+                        print(f"   Candidate 0 extracted: {extract_item_from_text(candidates_debug[0]) if candidates_debug else 'N/A'}")
+                        print(f"   Scores: {scores[:4]}")
                     
             except Exception as e:
                 # Fallback to direct score if beam search fails
@@ -542,7 +718,10 @@ def create_rollout_beam_reward(
                 max_score = direct_score
             
             all_max_scores.append(max_score)
-            rewards.append(max_score / 4.0)  # Normalize to [0, 1]
+            # Add reasoning bonus for completions with proper reasoning
+            base_reward = max_score / 4.0  # Normalize to [0, 1]
+            final_reward = base_reward + REASONING_BONUS
+            rewards.append(min(final_reward, 1.0))  # Cap at 1.0
         
         # Debug logging
         if call_count[0] <= 5 or call_count[0] % 100 == 0:
@@ -556,7 +735,24 @@ def create_rollout_beam_reward(
             print(f"   Reward: avg={avg_reward:.4f}, std={std_reward:.4f}")
             print(f"   Direct score avg: {avg_direct:.2f}, Max-of-K score avg: {avg_max:.2f}")
             print(f"   Score distribution (max of {beam_width} beams): {score_dist}")
-            print(f"   Completions with reasoning: {reasoning_count}/{len(completions)}")
+            print(f"   Completions: {reasoning_count} proper reasoning, {incomplete_reasoning_count} incomplete, {len(completions) - reasoning_count - incomplete_reasoning_count} none")
+            print(f"   Reasoning bonus: +{REASONING_BONUS}, No-reasoning penalty: x{NO_REASONING_PENALTY}")
+        
+        # Log samples to wandb callback if available
+        if text_logging_callback is not None:
+            # Collect beam candidates for each sample
+            beam_candidates_list = []
+            for completion in completions:
+                # Extract the item from completion as the "beam candidate" for logging
+                item = extract_item_from_text(completion)
+                beam_candidates_list.append([item] if item else ["NO_ITEM"])
+            
+            text_logging_callback.add_samples(
+                prompts=prompts,
+                completions=completions,
+                rewards=rewards,
+                beam_candidates=beam_candidates_list,
+            )
         
         return rewards
     
@@ -598,17 +794,33 @@ def create_hierarchical_match_reward(
     prompt2target: Dict[str, str],
     num_generations: int = 16,
     debug_print: bool = True,
+    reasoning_bonus: float = 0.15,
+    no_reasoning_penalty: float = 0.5,
 ) -> Callable:
     """
-    Hierarchical match reward using paper's scoring formula.
+    Hierarchical match reward using paper's scoring formula + reasoning incentives.
     
     Implements: score = sum_{l=1}^{L} I(s^l_pred == s^l_target) / 4
     
+    With reasoning incentives:
+    - Proper <think>...</think>: score + reasoning_bonus
+    - No proper reasoning: score * no_reasoning_penalty
+    
     This provides a normalized reward in [0, 1] based on hierarchical SID matching.
-    Unlike rollout_beam, this scores the direct completion without additional beam search.
     """
     
     call_count = [0]  # Use list to allow mutation in closure
+    
+    def extract_reasoning(completion: str) -> str:
+        """Extract reasoning from completion (everything up to and including </think>)."""
+        match = re.search(r'(<think>.*?</think>)', completion, re.DOTALL)
+        if match:
+            return match.group(1)
+        return ""
+    
+    def has_any_reasoning(completion: str) -> bool:
+        """Check if completion has any reasoning attempt (even incomplete)."""
+        return '<think>' in completion
     
     def reward_fn(prompts: List[str], completions: List[str], **kwargs) -> List[float]:
         rewards = []
@@ -616,6 +828,12 @@ def create_hierarchical_match_reward(
         
         # Debug: print first few samples every N calls
         should_print = debug_print and (call_count[0] <= 3 or call_count[0] % 50 == 0)
+        
+        # Stats tracking
+        reasoning_count = 0
+        incomplete_count = 0
+        no_reasoning_count = 0
+        scores = []
         
         if should_print:
             print("\n" + "=" * 60)
@@ -628,39 +846,52 @@ def create_hierarchical_match_reward(
             
             if not target:
                 rewards.append(0.0)
+                scores.append(0)
                 continue
             
-            # Compute hierarchical match score
-            reward = compare_item_tokens(completion, target)
-            rewards.append(reward)
+            # Compute hierarchical match score (0-4 -> 0-1)
+            base_score = compute_hierarchical_match_score(completion, target)
+            scores.append(base_score)
+            base_reward = base_score / 4.0
+            
+            # Check for reasoning
+            reasoning = extract_reasoning(completion)
+            
+            if reasoning:
+                # Has proper <think>...</think>: add bonus
+                final_reward = min(base_reward + reasoning_bonus, 1.0)
+                reasoning_count += 1
+            elif has_any_reasoning(completion):
+                # Has <think> but no </think>: slight penalty
+                final_reward = base_reward * no_reasoning_penalty
+                incomplete_count += 1
+            else:
+                # No reasoning at all: full penalty
+                final_reward = base_reward * no_reasoning_penalty
+                no_reasoning_count += 1
+            
+            rewards.append(final_reward)
             
             # Print debug info for first few samples
             if should_print and i < 3:
-                # Truncate prompt for display
-                prompt_short = prompt[-200:] if len(prompt) > 200 else prompt
-                completion_short = completion[:500] if len(completion) > 500 else completion
-                
                 pred_item = extract_item_from_text(completion)
                 target_item = extract_item_from_text(target)
                 
-                # Check for key tokens
-                has_think_end = "</think>" in completion
-                has_item_begin = "<|item_begin|>" in completion
-                has_sid_begin = "<|sid_begin|>" in completion
-                
                 print(f"\n--- Sample {i} ---")
-                print(f"PROMPT (last 200 chars): ...{prompt_short}")
-                print(f"COMPLETION ({len(completion)} chars): {repr(completion_short)}")
-                print(f"HAS </think>: {has_think_end}, HAS <|item_begin|>: {has_item_begin}, HAS <|sid_begin|>: {has_sid_begin}")
-                print(f"PREDICTED ITEM: {pred_item}")
-                print(f"TARGET ITEM: {target_item}")
-                print(f"REWARD: {reward:.4f}")
-                print(f"MATCH: {'✓ YES' if reward > 0 else '✗ NO'}")
+                print(f"REASONING: {'✓' if reasoning else ('partial' if has_any_reasoning(completion) else '✗')}")
+                print(f"PREDICTED: {pred_item}")
+                print(f"TARGET: {target_item}")
+                print(f"SCORE: {base_score}/4, REWARD: {final_reward:.4f}")
         
         if should_print:
             avg_reward = sum(rewards) / len(rewards) if rewards else 0
-            hits = sum(1 for r in rewards if r > 0)
-            print(f"\n📊 Batch Stats: avg_reward={avg_reward:.4f}, hits={hits}/{len(rewards)}")
+            std_reward = (sum((r - avg_reward)**2 for r in rewards) / len(rewards))**0.5 if rewards else 0
+            avg_score = sum(scores) / len(scores) if scores else 0
+            hits = sum(1 for s in scores if s > 0)
+            print(f"\n📊 Batch Stats:")
+            print(f"   Reward: avg={avg_reward:.4f}, std={std_reward:.4f}")
+            print(f"   Score: avg={avg_score:.2f}/4, hits={hits}/{len(scores)}")
+            print(f"   Reasoning: {reasoning_count} proper, {incomplete_count} incomplete, {no_reasoning_count} none")
             print("=" * 60 + "\n")
         
         return rewards
@@ -816,7 +1047,7 @@ def main():
     if args.val_data_path:
         eval_dataset = RLRecommendationDataset(
             args.val_data_path,
-            sample_num=min(1000, args.sample_num) if args.sample_num > 0 else 1000,
+            sample_num=min(200, args.sample_num) if args.sample_num > 0 else 200,  # Reasonable eval size
             seed=args.seed,
         )
     
@@ -842,6 +1073,16 @@ def main():
     if eval_dataset:
         prompt2target.update(eval_dataset.prompt2target)
     
+    # Create text logging callback for wandb (eval only, 50 samples per eval)
+    text_logging_callback = None
+    if WANDB_AVAILABLE:
+        text_logging_callback = TextSamplesLoggingCallback(
+            tokenizer=tokenizer,
+            prompt2target=prompt2target,
+            num_samples_per_eval=50,
+        )
+        print("   Text sample logging to wandb enabled (50 samples per eval)")
+    
     if args.reward_type == "simple":
         reward_fn = create_simple_match_reward(prompt2target)
     elif args.reward_type == "hierarchical":
@@ -855,6 +1096,7 @@ def main():
             model=model,
             beam_width=args.beam_width,
             device="cuda" if torch.cuda.is_available() else "cpu",
+            text_logging_callback=text_logging_callback,
         )
         print(f"   Using Rollout-Beam reward with K={args.beam_width} beam candidates")
     
@@ -887,6 +1129,7 @@ def main():
         save_strategy=args.save_strategy,
         save_total_limit=args.save_total_limit,
         eval_strategy=args.eval_strategy if eval_hf_dataset else "no",
+        eval_on_start=True if eval_hf_dataset else False,  # Run eval at beginning
         
         # Precision
         bf16=args.bf16,
@@ -918,6 +1161,11 @@ def main():
             min_steps=args.early_stopping_min_steps,
         )
         callbacks.append(early_stopping_callback)
+    
+    # Add text logging callback
+    if text_logging_callback is not None:
+        callbacks.append(text_logging_callback)
+        print("   Text sample logging callback added")
     
     # Create trainer
     trainer = GRPOTrainer(

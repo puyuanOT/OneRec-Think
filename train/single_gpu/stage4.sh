@@ -61,18 +61,21 @@ export WANDB_RUN_GROUP="${WANDB_RUN_GROUP:-stage4}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 
 echo "[stage4] Starting GRPO training with Rollout-Beam reward..."
-echo "[stage4] Parameters (reduced K/G for efficiency):"
-echo "[stage4]   |G| = 4 (CoT paths sampled per prompt, paper uses 16)"
-echo "[stage4]   K = 5 (beam width, paper uses 32)"
-echo "[stage4]   epochs = 6 (with early stopping)"
+echo "[stage4] Parameters (larger G, smaller K):"
+echo "[stage4]   |G| = 16 (CoT paths sampled per prompt)"
+echo "[stage4]   K = 4 (beam width)"
+echo "[stage4]   epochs = 6"
 echo "[stage4]   learning_rate = 1e-5"
-echo "[stage4]   beta (KL coeff) = 0.001"
+echo "[stage4]   beta (KL coeff) = 0.01 (increased to stay closer to SFT model)"
 echo "[stage4]   epsilon (clip ratio) = 0.2"
 echo "[stage4]"
-echo "[stage4] Reward types available:"
-echo "[stage4]   - rollout_beam: Paper's method - beam search K candidates after CoT, MAX score (recommended)"
-echo "[stage4]   - hierarchical: Direct scoring of GRPO completions (faster, less accurate)"
-echo "[stage4]   - simple: Binary exact match reward (sparse signal)"
+echo "[stage4] Reward modifications:"
+echo "[stage4]   - Reasoning bonus: +0.15 for proper <think>...</think> blocks"
+echo "[stage4]   - No-reasoning penalty: x0.5 score reduction"
+echo "[stage4]"
+echo "[stage4] Wandb logging:"
+echo "[stage4]   - Text samples logged every 500 steps"
+echo "[stage4]   - Check wandb for model input/output debugging"
 
 python ./scripts/train_rl.py \
   --model_name_or_path "${CKPT}" \
@@ -83,14 +86,14 @@ python ./scripts/train_rl.py \
   --lora_alpha 128 \
   --lora_dropout 0.05 \
   --lora_target_modules "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj" \
-  --per_device_train_batch_size 4 \
-  --per_device_eval_batch_size 4 \
-  --gradient_accumulation_steps 4 \
+  --per_device_train_batch_size 16 \
+  --per_device_eval_batch_size 16 \
+  --gradient_accumulation_steps 2 \
   --num_train_epochs 6 \
-  --num_generations 4 \
-  --beam_width 5 \
+  --num_generations 16 \
+  --beam_width 4 \
   --learning_rate 1e-5 \
-  --beta 0.001 \
+  --beta 0.01 \
   --epsilon 0.2 \
   --temperature 1.0 \
   --max_new_tokens 512 \
